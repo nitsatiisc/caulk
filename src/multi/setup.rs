@@ -230,7 +230,7 @@ impl<E: PairingEngine> PublicParameters<E> {
     // also includes a bunch of precomputation.
     // @max_degree max degree of table polynomial C(X), also the size of the trusted
     // setup @N domain size on which proofs are constructed. Should not be
-    // smaller than max_degree @m lookup size. Can be changed later
+    // smaller than max_degree @m lookup size. Can be c hanged later
     // @n suppl domain for the unity proofs. Should be at least 6+log N
     #[allow(non_snake_case)]
     pub fn setup(max_degree: &usize, N: &usize, m: &usize, n: &usize) -> PublicParameters<E> {

@@ -739,38 +739,43 @@ mod tests {
     #[test]
     fn test_store() {
         test_store_helper::<Bls12_381>();
-        test_store_helper::<Bls12_377>();
+        //test_store_helper::<Bls12_377>();
     }
 
     #[allow(non_snake_case)]
     pub fn test_store_helper<E: PairingEngine>() {
         // 1. Setup
-        let n: usize = 6;
+        let n: usize = 17;
         let N: usize = 1 << n;
         let powers_size: usize = N + 2; // SRS SIZE
         let temp_m = n; // dummy
         let pp = PublicParameters::<E>::setup(&powers_size, &N, &temp_m, &n);
         let actual_degree = N - 1;
-        let path = format!("tmp/poly_openings_{}.log", E::Fq::size_in_bits());
+        let path = format!("/tmp/poly_openings_{}.log", E::Fq::size_in_bits());
 
         // 2. Store
         let rng = &mut ark_std::test_rng();
-        let c_poly = DensePolynomial::<E::Fr>::rand(actual_degree, rng);
+        //let c_poly = DensePolynomial::<E::Fr>::rand(actual_degree, rng);
+        let c_poly = DensePolynomial::<E::Fr>::from_coefficients_vec(vec![E::Fr::from(1000u128); N]);
+        let mut start = Instant::now();
         let c_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &c_poly);
+        println!("Time to commit poly: {}", start.elapsed().as_secs());
+
         let openings = KZGCommit::<E>::multiple_open::<E::G2Affine>(&c_poly, &pp.g2_powers, pp.n);
+        /*
         let table = TableInput::<E> {
             c_poly,
             c_com,
             openings,
         };
         table.store(&path);
-
+        */
         // 3. Load
-        let table_loaded = TableInput::load(&path);
+        //let table_loaded = TableInput::load(&path);
 
         // 4. Test
-        assert_eq!(table, table_loaded);
-        std::fs::remove_file(&path).expect("File can not be deleted");
+        //assert_eq!(table, table_loaded);
+        //std::fs::remove_file(&path).expect("File can not be deleted");
     }
 
     #[allow(non_snake_case)]

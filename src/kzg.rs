@@ -15,6 +15,7 @@ use ark_poly::{
 use ark_poly_commit::kzg10::*;
 use ark_std::{end_timer, start_timer, One, Zero};
 use std::marker::PhantomData;
+use std::time::Instant;
 
 /////////////////////////////////////////////////////////////////////
 // KZG opening and verifying
@@ -98,21 +99,27 @@ impl<E: PairingEngine> KZGCommit<E> {
         let input_domain: GeneralEvaluationDomain<E::Fr> = EvaluationDomain::new(degree).unwrap();
 
         let h_timer = start_timer!(|| "compute h");
+        let mut start = Instant::now();
         let powers: Vec<G::Projective> = powers.iter().map(|x| x.into_projective()).collect();
         let h2 = compute_h(c_poly, &powers, p);
         end_timer!(h_timer);
+        println!("Computed h polynomial in time: {}", start.elapsed().as_secs());
 
         let dom_size = input_domain.size();
         assert_eq!(1 << p, dom_size);
         assert_eq!(degree + 1, dom_size);
 
         let dft_timer = start_timer!(|| "G1 dft");
+        start = Instant::now();
         let q2 = group_dft::<E::Fr, G::Projective>(&h2, p);
         end_timer!(dft_timer);
+        println!("Computed DFT in time: {}", start.elapsed().as_secs());
 
         let normalization_timer = start_timer!(|| "batch normalization");
+        start = Instant::now();
         let res = G::Projective::batch_normalization_into_affine(q2.as_ref());
         end_timer!(normalization_timer);
+        println!("Computed Batch Normalization in time: {}", start.elapsed().as_secs());
 
         end_timer!(timer);
         res
@@ -466,7 +473,7 @@ pub fn generate_lagrange_polynomials_subset<E: PairingEngine>(
                 let denum = E::Fr::one() / denum;
                 tau_j = &tau_j
                     * &DensePolynomial::from_coefficients_slice(&[
-                        -srs.domain_N.element(positions[k]) * denum, //-w^(i_k))/(w^(i_j)-w^(i_k)
+                        -srs.domain_N.element(positions[k]) * denum.clone(), //-w^(i_k))/(w^(i_j)-w^(i_k)
                         denum,                                       // 1//(w^(i_j)-w^(i_k))
                     ]);
             }
