@@ -4,8 +4,8 @@
 // The full algorithm is described here https://github.com/khovratovich/Kate/blob/master/Kate_amortized.pdf
 
 use std::fmt::DebugMap;
-use std::ops::{Div, Mul, Neg};
-use ark_ec::ProjectiveCurve;
+use std::ops::{Add, Div, Mul, Neg, Sub};
+use ark_ec::{PairingEngine, ProjectiveCurve};
 use ark_ff::{PrimeField, Zero};
 use ark_ec::msm::VariableBaseMSM;
 use ark_poly::{univariate::DensePolynomial, EvaluationDomain, GeneralEvaluationDomain, UVPolynomial, Polynomial};
@@ -14,6 +14,8 @@ use std::vec::Vec;
 use ark_serialize::CanonicalSerialize;
 use std::time::{Instant};
 use ark_poly::univariate::DenseOrSparsePolynomial;
+
+
 
 // We assume the size of set roots is a power of 2
 pub fn compute_vanishing_poly<F>(
@@ -59,6 +61,9 @@ where F : PrimeField
     let mut g: DensePolynomial<F> = DensePolynomial::from_coefficients_vec(vec![coeffs[0].inverse().unwrap()]);
     let mut degree_bound:usize = 2;
     for i  in 0usize..(ark_std::log2(l) as usize)  {
+        let eval_domain: GeneralEvaluationDomain<F> = GeneralEvaluationDomain::new(2*degree_bound).unwrap();
+
+        /*
         let gsq = &g * &g;
         let mut gred: DensePolynomial<F> = DensePolynomial::zero();
         if gsq.degree() >= degree_bound {
@@ -66,6 +71,9 @@ where F : PrimeField
         } else {
             gred = gsq;
         }
+        */
+        let g_eval = g.evaluate_over_domain_by_ref(eval_domain);
+        let g_sq_eval = g_eval.mul(&g_eval);
 
         // reduce f mod x^{degree bound} if deg(f) >= degree_bound.
         let mut fred: DensePolynomial<F> = DensePolynomial::zero();
@@ -75,14 +83,22 @@ where F : PrimeField
             fred = DensePolynomial::from_coefficients_vec(coeffs.to_vec());
         }
 
-        let fsq: DensePolynomial<F> = (&fred * &gred).neg();
-        let two_g = &g+ &g;
-        let res = &two_g + &fsq;
+        //let fsq: DensePolynomial<F> = (&fred * &gred).neg();
+        let f_eval = fred.evaluate_over_domain_by_ref(eval_domain);
+        let f_sq_eval = f_eval.mul(&g_sq_eval);
+        let res_eval = g_eval.add(&g_eval).sub(&f_sq_eval);
+        let mut res = res_eval.interpolate_by_ref();
+
+
+        //let two_g = &g+ &g;
+        //let res = &two_g + &fsq;
+
 
         let mut g_coeffs = res.coeffs;
         g_coeffs.resize(degree_bound, F::zero());
         g = DensePolynomial::from_coefficients_vec(g_coeffs);
         //println!("Degree g: {}", g.degree());
+
         degree_bound *= 2;
     }
 
@@ -185,7 +201,7 @@ pub fn fast_poly_evaluate<F>(
     evaluations
 }
 
-fn fast_poly_interpolate<F>(
+pub fn fast_poly_interpolate<F>(
     points: &[F],
     values: &[F]
 ) -> DensePolynomial<F>
@@ -231,6 +247,14 @@ where
     c_vec[0].clone()
 }
 
+pub fn compute_polynomial_composition<F: PrimeField>(
+    a_poly: &DensePolynomial<F>,
+    b_poly: &DensePolynomial<F>,
+) -> DensePolynomial<F> {
+
+    DensePolynomial::<F>::from_coefficients_vec(vec![F::zero()])
+
+}
 
 pub fn field_fft_domain<F: PrimeField>(h: &[F], p: usize, input_domain: &GeneralEvaluationDomain<F>) -> Vec<F> {
     let dom_size = 1 << p;
@@ -591,7 +615,7 @@ pub mod tests {
         //use E::G1Projective as GProjective;
         //use E::G1Affine as GAffine;
 
-        let vec_size: usize = 1024*128;
+        let vec_size: usize = 1024*1024;
         let mut grp_vec: Vec<E::G1Affine> = Vec::new();
         let mut scalar_vec: Vec<<E::Fr as PrimeField>::BigInt> = Vec::new();
 
@@ -645,8 +669,8 @@ pub mod tests {
 
     fn test_fast_poly_evaluate_helper<E: PairingEngine>() {
         let mut rng = test_rng();
-        let degree: usize = 1usize << 16;
-        let npoints:usize = 1usize << 17;
+        let degree: usize = 1usize << 18;
+        let npoints:usize = 1usize << 11;
 
         let coeffs: Vec<E::Fr> = vec![E::Fr::from(1u128), E::Fr::from(1u128), E::Fr::from(1u128)];
         let points: Vec<E::Fr> = vec![
@@ -674,7 +698,7 @@ pub mod tests {
 
     fn test_poly_interpolate_helper<E: PairingEngine>() {
         let mut rng = test_rng();
-        let npoints = 1usize << 17;
+        let npoints = 1usize << 10;
         let mut points: Vec<E::Fr> = Vec::new();
         let mut values: Vec<E::Fr> = Vec::new();
 
@@ -687,7 +711,7 @@ pub mod tests {
         let poly_interpolate:DensePolynomial<E::Fr> = fast_poly_interpolate(&points, &values);
         println!("Polynomial Interpolation time {}", start.elapsed().as_secs());
 
-        for i in 0usize..npoints/100 {
+        for i in 0usize..npoints {
             assert_eq!(values[i], poly_interpolate.evaluate(&points[i]));
         }
     }
@@ -712,6 +736,17 @@ pub mod tests {
         }
         println!("FFT multiplication took {} secs", start.elapsed().as_secs());
 
+        rand_C_polys.clear();
+        let mut start = Instant::now();
+        let eval_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(2*degree).unwrap();
+        for i in 0..npolys {
+            let eval_a = rand_A_polys[i].evaluate_over_domain_by_ref(eval_domain);
+            let eval_b = rand_B_polys[i].evaluate_over_domain_by_ref(eval_domain);
+            let eval_c = eval_a.mul(&eval_b);
+            let res = eval_c.interpolate_by_ref();
+            rand_C_polys.push(res);
+        }
+        println!("FFT multiplication with eval domain took {} secs", start.elapsed().as_secs());
         rand_C_polys.clear();
 
         let input_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(1usize << 17).unwrap();

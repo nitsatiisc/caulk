@@ -65,7 +65,7 @@ pub struct LookupProof<E: PairingEngine> {
 }
 
 impl<E: PairingEngine> TableInput<E> {
-    fn store(&self, path: &str) {
+    pub fn store(&self, path: &str) {
         // 1. Polynomial
         let mut o_bytes = vec![];
         let mut f = File::create(path).expect("Unable to create file");
@@ -97,7 +97,7 @@ impl<E: PairingEngine> TableInput<E> {
         f.write_all(&o_bytes).expect("Unable to write data");
     }
 
-    fn load(path: &str) -> TableInput<E> {
+    pub fn load(path: &str) -> TableInput<E> {
         const FR_UNCOMPR_SIZE: usize = 32;
         const G1_UNCOMPR_SIZE: usize = 96;
         const G2_UNCOMPR_SIZE: usize = 192;

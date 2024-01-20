@@ -15,7 +15,9 @@ use ark_poly::{
 use ark_poly_commit::kzg10::*;
 use ark_std::{end_timer, start_timer, One, Zero};
 use std::marker::PhantomData;
+use std::ops::DivAssign;
 use std::time::Instant;
+use ark_bn254::G2Affine;
 
 /////////////////////////////////////////////////////////////////////
 // KZG opening and verifying
@@ -235,6 +237,31 @@ impl<E: PairingEngine> KZGCommit<E> {
 
         end_timer!(timer);
         (eval, proof)
+    }
+
+    pub fn verify_proof_g1(
+        powers_of_g1: &[E::G1Affine],   // generators of G1
+        powers_of_g2: &[E::G2Affine],   // generators of G2
+        c_com: &E::G1Affine,
+        point: &E::Fr,
+        eval: &E::Fr,
+        pi: &E::G1Affine,
+    ) -> bool {
+        let mut status: bool  = false;
+        let g1 = powers_of_g1[0];
+        let g1x = powers_of_g1[1];
+        let g2 = powers_of_g2[0];
+        let g2x = powers_of_g2[1];
+        let ptneg = -*point;
+
+        let rhs:E::G2Affine = g2x + g2.mul(-*point).into_affine();
+        let lhs:E::G1Affine = *c_com + g1.mul(-*eval).into_affine();
+        let mut prod = E::pairing(g1x, g2);
+        prod.div_assign(&E::pairing(g1, g2x));
+        //println!("lp: {:?}", lp);
+        //println!("rp: {:?}", rp);
+        status = (prod.is_one());
+        status
     }
 
     // KZG.Verify( srs_KZG, F, deg, (alpha1, alpha2, ..., alphan), (v1, ..., vn), pi

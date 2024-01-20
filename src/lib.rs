@@ -5,6 +5,7 @@ mod pedersen;
 mod single;
 mod transcript;
 pub(crate) mod util;
+mod ramlookup;
 
 pub use dft::*;
 pub use kzg::KZGCommit;

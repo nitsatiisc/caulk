@@ -27,6 +27,8 @@ blake2s_simd = "1.0.0"
 
 rayon = { version = "1.5.2", default-features = false, optional = true }
 merlin = { version = "3.0.0" }
+ark-bn254 = "0.4.0"
+concat-arrays = "0.1.2"
 
 [features]
 asm = [ "ark-ff/asm" ]

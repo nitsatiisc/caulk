@@ -16,6 +16,8 @@ use std::{
     io::{Read, Write},
     time::Instant,
 };
+use ark_bls12_381::Bls12_381;
+use ark_bn254::Bn254;
 
 // structure of public parameters
 #[allow(non_snake_case)]
@@ -278,7 +280,8 @@ impl<E: PairingEngine> PublicParameters<E> {
                 // arkworks setup doesn't give these powers but the setup does use a fixed
                 // randomness to generate them. so we can generate powers of g2
                 // directly.
-                let beta = E::Fr::rand(rng);
+                let rng = &mut ark_std::test_rng();
+                let mut beta = E::Fr::rand(rng);
                 let mut temp = poly_vk.h;
 
                 for _ in 0..poly_ck.powers_of_g.len() {
@@ -339,12 +342,12 @@ impl<E: PairingEngine> PublicParameters<E> {
 #[allow(non_snake_case)]
 pub fn test_load() {
     use ark_bls12_381::Bls12_381;
-
     let n: usize = 4;
     let N: usize = 1 << n;
     let powers_size: usize = 4 * N; // SRS SIZE
     let temp_m = n; // dummy
     let pp = PublicParameters::<Bls12_381>::setup(&powers_size, &N, &temp_m, &n);
+
     let path = "powers.log";
     pp.store(path);
     let loaded = PublicParameters::<Bls12_381>::load(path);
