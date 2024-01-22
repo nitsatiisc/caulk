@@ -1,4 +1,5 @@
 pub mod caulkplus;
+mod fastupdate;
 
 use std::marker::PhantomData;
 use std::ops::{Mul, Neg, Sub};
