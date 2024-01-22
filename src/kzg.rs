@@ -5,7 +5,7 @@
 // (4) hash_caulk_single is for hashing group and field elements into a field
 // element (5) random_field is for generating random field elements
 
-use crate::{compute_h, group_dft, util::convert_to_bigints};
+use crate::{compute_h, compute_h_fake, field_dft, group_dft, util::convert_to_bigints};
 use ark_ec::{msm::VariableBaseMSM, AffineCurve, PairingEngine, ProjectiveCurve};
 use ark_ff::{Field, PrimeField};
 use ark_poly::{
@@ -126,6 +126,54 @@ impl<E: PairingEngine> KZGCommit<E> {
         end_timer!(timer);
         res
     }
+
+    pub fn multiple_open_fake<G>(
+        c_poly: &DensePolynomial<E::Fr>, // c(X)
+        powers: &[E::Fr],                    // SRS
+        g1: G,
+        p: usize,
+    ) -> Vec<G>
+        where
+            G: AffineCurve<ScalarField = E::Fr> + Sized,
+    {
+        let timer = start_timer!(|| "multiple open");
+
+        let degree = c_poly.coeffs.len() - 1;
+        let input_domain: GeneralEvaluationDomain<E::Fr> = EvaluationDomain::new(degree).unwrap();
+
+        let h_timer = start_timer!(|| "compute h");
+        let mut start = Instant::now();
+        //let powers: Vec<G::Projective> = powers.iter().map(|x| x.into_projective()).collect();
+        let h2 = compute_h_fake(c_poly, &powers, p);
+        end_timer!(h_timer);
+        println!("Computed h polynomial in time: {}", start.elapsed().as_secs());
+
+        let dom_size = input_domain.size();
+        assert_eq!(1 << p, dom_size);
+        assert_eq!(degree + 1, dom_size);
+
+        let dft_timer = start_timer!(|| "G1 dft");
+        start = Instant::now();
+        let q2 = field_dft::<E::Fr>(&h2, p);
+        end_timer!(dft_timer);
+        println!("Computed DFT in time: {}", start.elapsed().as_secs());
+
+        let mut q3: Vec<G::Projective> = Vec::new();
+        for i in 0..q2.len() {
+            q3.push(g1.mul(q2[i]));
+        }
+
+        let normalization_timer = start_timer!(|| "batch normalization");
+        start = Instant::now();
+        let res = G::Projective::batch_normalization_into_affine(q3.as_ref());
+        end_timer!(normalization_timer);
+        println!("Computed Batch Normalization in time: {}", start.elapsed().as_secs());
+
+        end_timer!(timer);
+        res
+    }
+
+
 
     ////////////////////////////////////////////////
     // KZG.Open( srs_KZG, f(X, Y), deg, alpha )
