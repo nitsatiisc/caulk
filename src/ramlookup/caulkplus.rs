@@ -684,7 +684,7 @@ mod tests {
     use ark_poly::{GeneralEvaluationDomain, Polynomial};
     use crate::multi::generate_lookup_input;
 
-    const h_domain_size: usize = 23;
+    const h_domain_size: usize = 22;
     const m_domain_size: usize = 9;
 
 
