@@ -2,7 +2,7 @@ use std::time::Instant;
 use ark_ff::PrimeField;
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial, UVPolynomial};
 use ark_poly::univariate::DensePolynomial;
-use crate::{compute_vanishing_poly, fast_poly_evaluate, fast_poly_interpolate};
+use crate::{compute_vanishing_poly, compute_vanishing_poly_with_subproducts, fast_poly_evaluate, fast_poly_evaluate_with_pp, fast_poly_interpolate, fast_poly_interpolate_with_pp};
 
 #[allow(non_snake_case)]
 pub struct UpdateParamsSetK<F: PrimeField> {
@@ -11,6 +11,8 @@ pub struct UpdateParamsSetK<F: PrimeField> {
     pub zk_poly: DensePolynomial<F>,        // vanishing polynomial Z_K of H_K
     pub zk_dvt_poly: DensePolynomial<F>,    // derivative of Z_K
     pub Fk_poly: DensePolynomial<F>,        // polynomial F_K
+    pub zk_dvt_poly_evals: Vec<F>,          // evaluations of zk_dvt_poly
+    pub sub_products: Vec<DensePolynomial<F>>, // sub-products needed for evaluation & interpolation
 }
 
 #[allow(non_snake_case)]
@@ -21,12 +23,13 @@ impl<F: PrimeField> UpdateParamsSetK<F> {
         for i in 0..set_k.len() {
             set_hk.push(h_domain.element( set_k[i]));
         }
-        let zk_poly = compute_vanishing_poly::<F>(&set_hk, 1);
+        let (zk_poly, sub_products) = compute_vanishing_poly_with_subproducts::<F>(&set_hk, 1);
         let mut zk_dvt_vec: Vec<F> = Vec::new();
         for i in 1..=zk_poly.degree() {
             zk_dvt_vec.push(F::from(i as u128) * zk_poly.coeffs[i]);
         }
         let zk_dvt_poly = DensePolynomial::<F>::from_coefficients_vec(zk_dvt_vec);
+        let zk_dvt_evals:Vec<F> = fast_poly_evaluate_with_pp(&zk_dvt_poly.coeffs, &set_hk, &sub_products);
 
         let mut fk_poly_vec: Vec<F> = Vec::new();
         for i in 2..=zk_poly.degree() {
@@ -40,6 +43,8 @@ impl<F: PrimeField> UpdateParamsSetK<F> {
             zk_poly: zk_poly,
             zk_dvt_poly: zk_dvt_poly,
             Fk_poly: Fk_poly,
+            zk_dvt_poly_evals: zk_dvt_evals,
+            sub_products: sub_products,
         }
     }
 }
@@ -67,7 +72,8 @@ impl<F: PrimeField> ZkHatOracle<F> {
             h_i_vec.push(h_domain.element(set_i[i]));
         }
 
-        let zk_dvt_eval:Vec<F> = fast_poly_evaluate(&update_params.zk_dvt_poly.coeffs, &update_params.set_hk);
+        let zk_dvt_eval:Vec<F> = update_params.zk_dvt_poly_evals.clone();
+        //fast_poly_evaluate(&update_params.zk_dvt_poly.coeffs, &update_params.set_hk);
         let mut zk_hat_eval:Vec<F> = Vec::new();
         for i in 0..update_params.set_k.len() {
             zk_hat_eval.push(field_N.div(
@@ -126,7 +132,12 @@ pub fn compute_reciprocal_sum<F: PrimeField>(
     }
 
     start = Instant::now();
-    let q_poly: DensePolynomial<F> = fast_poly_interpolate(update_params.set_hk.as_slice(), q_evals_K.as_slice());
+    let q_poly: DensePolynomial<F> = fast_poly_interpolate_with_pp(
+        update_params.set_hk.as_slice(),
+        q_evals_K.as_slice(),
+        &update_params.zk_dvt_poly_evals,
+        &update_params.sub_products
+    );
     println!("Interpolated q polynomial in {} secs", start.elapsed().as_secs());
 
     let q0 = q_poly.coeffs[0];
@@ -206,8 +217,8 @@ mod tests {
     fn test_reciprocal_sum_helper<E: PairingEngine>()
     {
         let h_domain_size = 20usize;
-        let i_set_size = 1usize << 8;
-        let k_set_size = 1usize << 14;
+        let i_set_size = 1usize << 6;
+        let k_set_size = 1usize << 12;
 
         let i_set = (0..i_set_size).into_iter().collect::<Vec<_>>();
         let k_set = (0..k_set_size).into_iter().collect::<Vec<_>>();

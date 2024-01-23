@@ -50,6 +50,27 @@ where
     result
 }
 
+pub fn compute_vanishing_poly_with_subproducts<F: PrimeField>(
+    points: &[F],
+    p: usize,               // log of degree
+) -> (DensePolynomial<F>, Vec<DensePolynomial<F> >) {
+
+    let r = points.len();
+    let mut sub_products: Vec<DensePolynomial<F>> = Vec::new();
+    sub_products.resize(2*r-1, DensePolynomial::<F>::zero());
+    // initialize the final layer of monomials
+    for i in 0usize..r {
+        sub_products[r-1+i] = DensePolynomial::from_coefficients_vec(vec![points[i].neg(), F::from(1u128)]);
+    }
+
+    // compute sub-products, we skip computing the final subproduct which is the full vanishing polynomial
+    for i in (0usize..(r-1)).rev() {
+        let j = 2*i+1;
+        sub_products[i] = &sub_products[j] * &sub_products[j+1];
+    }
+
+    (sub_products[0].clone(), sub_products)
+}
 pub fn fast_invert_poly<F>(
     coeffs: &[F],               // coefficients of the polynomial
     l: usize                    // l denoting the numerator X^l
@@ -57,48 +78,26 @@ pub fn fast_invert_poly<F>(
 where F : PrimeField
 {
     let mut result: DensePolynomial<F> = DensePolynomial::zero();
-    let f: DensePolynomial<F> = DensePolynomial::from_coefficients_vec(coeffs.to_vec());
     let mut g: DensePolynomial<F> = DensePolynomial::from_coefficients_vec(vec![coeffs[0].inverse().unwrap()]);
     let mut degree_bound:usize = 2;
+
     for i  in 0usize..(ark_std::log2(l) as usize)  {
         let eval_domain: GeneralEvaluationDomain<F> = GeneralEvaluationDomain::new(2*degree_bound).unwrap();
-
-        /*
-        let gsq = &g * &g;
-        let mut gred: DensePolynomial<F> = DensePolynomial::zero();
-        if gsq.degree() >= degree_bound {
-            gred = DensePolynomial::from_coefficients_vec(gsq.coeffs[0..degree_bound].to_vec());
-        } else {
-            gred = gsq;
-        }
-        */
         let g_eval = g.evaluate_over_domain_by_ref(eval_domain);
         let g_sq_eval = g_eval.mul(&g_eval);
 
         // reduce f mod x^{degree bound} if deg(f) >= degree_bound.
-        let mut fred: DensePolynomial<F> = DensePolynomial::zero();
-        if degree_bound < coeffs.len() {
-            fred = DensePolynomial::from_coefficients_vec(coeffs.to_vec()[0..degree_bound].to_vec());
-        } else {
-            fred = DensePolynomial::from_coefficients_vec(coeffs.to_vec());
-        }
+        let mut f_coeffs = coeffs.to_vec();
+        f_coeffs.resize(degree_bound, F::zero());
+        let mut fred: DensePolynomial<F> = DensePolynomial::from_coefficients_vec(f_coeffs);
 
-        //let fsq: DensePolynomial<F> = (&fred * &gred).neg();
         let f_eval = fred.evaluate_over_domain_by_ref(eval_domain);
         let f_sq_eval = f_eval.mul(&g_sq_eval);
         let res_eval = g_eval.add(&g_eval).sub(&f_sq_eval);
-        let mut res = res_eval.interpolate_by_ref();
-
-
-        //let two_g = &g+ &g;
-        //let res = &two_g + &fsq;
-
-
+        let res = res_eval.interpolate_by_ref();
         let mut g_coeffs = res.coeffs;
         g_coeffs.resize(degree_bound, F::zero());
         g = DensePolynomial::from_coefficients_vec(g_coeffs);
-        //println!("Degree g: {}", g.degree());
-
         degree_bound *= 2;
     }
 
@@ -201,6 +200,40 @@ pub fn fast_poly_evaluate<F>(
     evaluations
 }
 
+pub fn fast_poly_evaluate_with_pp<F>(
+    coeffs: &[F],
+    points: &[F],
+    sub_products: &Vec<DensePolynomial<F>>,
+) -> Vec<F> where
+    F: PrimeField
+{
+    let mut evaluations: Vec<F> = Vec::new();
+    let coeffs = coeffs.to_vec();
+    let points = points.to_vec();
+
+    let r = points.len();
+    assert_eq!(sub_products.len(), 2*r-1, "Wrong length of sub_products");
+
+    let mut evaluation_polys: Vec<DensePolynomial<F>> = Vec::new();
+    evaluation_polys.resize(2*r-1, DensePolynomial::<F>::zero());
+    evaluation_polys[0] = DensePolynomial::from_coefficients_vec(coeffs);
+
+    let mut start = Instant::now();
+    for i in 1usize..(2*r-1) {
+        let (_, rem) = fast_div_poly(&evaluation_polys[(i-1)/2].coeffs, &sub_products[i].coeffs );
+        evaluation_polys[i] = rem;
+    }
+    println!("Time for divisions = {}", start.elapsed().as_secs());
+
+    for i in 0..r {
+        evaluations.push(evaluation_polys[r-1+i].coeffs[0]);
+    }
+
+    evaluations
+}
+
+
+
 pub fn fast_poly_interpolate<F>(
     points: &[F],
     values: &[F]
@@ -246,6 +279,36 @@ where
 
     c_vec[0].clone()
 }
+
+pub fn fast_poly_interpolate_with_pp<F>(
+    points: &[F],
+    values: &[F],
+    evaluations: &[F],          // pre-computed evaluations
+    sub_products: &Vec<DensePolynomial<F>>,         // pre-computed sub-products
+) -> DensePolynomial<F>
+    where
+        F: PrimeField
+{
+    let r = points.len();
+    let mut c_vec: Vec<DensePolynomial<F>> = Vec::new();
+    c_vec.resize(2*r-1, DensePolynomial::zero());
+
+    // initialize the final layer of monomials
+    for i in 0usize..r {
+        c_vec[r-1+i] = DensePolynomial::from_coefficients_vec(vec![values[i] * evaluations[i].inverse().unwrap()]);
+    }
+
+    for i in (0..(r-1)).rev() {
+        let j = 2*i + 1;
+        let prod1 = &c_vec[j] * &sub_products[j+1];
+        let prod2 = &c_vec[j+1] * &sub_products[j];
+        c_vec[i] = &prod1 + &prod2;
+    }
+
+    c_vec[0].clone()
+}
+
+
 
 pub fn compute_polynomial_composition<F: PrimeField>(
     a_poly: &DensePolynomial<F>,
