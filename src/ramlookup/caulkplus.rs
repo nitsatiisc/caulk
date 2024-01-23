@@ -684,8 +684,8 @@ mod tests {
     use ark_poly::{GeneralEvaluationDomain, Polynomial};
     use crate::multi::generate_lookup_input;
 
-    const h_domain_size: usize = 22;
-    const m_domain_size: usize = 9;
+    const h_domain_size: usize = 20;
+    const m_domain_size: usize = 8;
 
 
     #[test]
@@ -744,6 +744,7 @@ mod tests {
             h_domain_size: h_domain_size,
         };
 
+        let mut start = Instant::now();
         let proof = compute_committed_index_lookup_proof(
             &instance,
             &instance_input,
@@ -751,7 +752,7 @@ mod tests {
             &caulk_pp,
             &pp
         );
-
+        println!("Generated committed index lookup proof in {} secs", start.elapsed().as_secs());
         let res = verify_committed_index_lookup_proof(
             &instance,
             &proof,

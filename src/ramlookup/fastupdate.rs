@@ -206,7 +206,7 @@ mod tests {
     fn test_reciprocal_sum_helper<E: PairingEngine>()
     {
         let h_domain_size = 20usize;
-        let i_set_size = 1usize << 10;
+        let i_set_size = 1usize << 8;
         let k_set_size = 1usize << 14;
 
         let i_set = (0..i_set_size).into_iter().collect::<Vec<_>>();
