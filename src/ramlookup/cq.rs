@@ -168,7 +168,7 @@ impl<F: PrimeField> CqExample<F> {
     }
 }
 
-pub fn compute_cq_proof<E: PairingEngine>(
+pub fn compute_cq_proof<E: PairingEngine<G1Affine = ()>>(
     instance: &CqLookupInstance<E>,
     input: &CqProverInput<E>,
     example: &CqExample<E::Fr>,
@@ -192,7 +192,10 @@ pub fn compute_cq_proof<E: PairingEngine>(
     let eta = transcript.get_and_append_challenge(b"ch_eta");
 
 
+    todo!();
 
+
+    /*
     CqProof::<E> {
         phi_com: (),
         a_com: (),
@@ -207,6 +210,8 @@ pub fn compute_cq_proof<E: PairingEngine>(
         a0_com: (),
         pi_h: (),
     }
+
+     */
 }
 
 fn compute_prover_round2<E: PairingEngine>(
@@ -218,7 +223,7 @@ fn compute_prover_round2<E: PairingEngine>(
     pp: &PublicParameters<E>) -> CqLookupInputRound2<E> {
 
     // compute non-zero lagrange coefficients A_i = m_i/(t_i + \beta)
-    let h_domain = GeneralEvaluationDomain::new(1 << instance.h_domain_size).unwrap();
+    let h_domain = GeneralEvaluationDomain::<E::Fr>::new(1 << instance.h_domain_size).unwrap();
     let m_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(1 << instance.m_domain_size).unwrap();
 
     let N = h_domain.size();
@@ -228,31 +233,31 @@ fn compute_prover_round2<E: PairingEngine>(
     let mut gens_Q: Vec<E::G1Affine> = Vec::new();
     let mut sparse_A_vec: Vec<(usize, E::Fr)> = Vec::new();
 
-    for iter in example.m_vec {
-        let coeff:E::Fr = iter.1.div(E::Fr::from(example.table[iter.0] as u128).add(beta)); // m_i/(t_i + \beta)
+    for iter in &example.m_vec {
+        let coeff:E::Fr = iter.1.div(E::Fr::from(example.table[*iter.0] as u128).add(beta)); // m_i/(t_i + \beta)
         scalars_A0.push(coeff);
-        sparse_A_vec.push((iter.0, iter.1));
-        scalars_A.push(coeff.mul(h_domain.element(iter.0)));     // scale by w^i
-        gens_A.push(cq_pp.openings_z_h_poly[iter.0]);
-        gens_Q.push(input.openings_t_poly[iter.0]);         // [Z_H(X)/X-w]
+        sparse_A_vec.push((*iter.0, *iter.1));
+        scalars_A.push(coeff.mul(h_domain.element(*iter.0)));     // scale by w^i
+        gens_A.push(cq_pp.openings_z_h_poly[*iter.0]);
+        gens_Q.push(input.openings_t_poly[*iter.0]);         // [Z_H(X)/X-w]
     }
     let a_com = VariableBaseMSM::multi_scalar_mul(&gens_A,
-                                                    &scalars_A.into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
-    let a_com = a_com.mul(E::Fr::from(N as u128).inverse().unwrap()).into_affine();
+                                                    &scalars_A.clone().into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
+    let a_com = a_com.into_affine().mul(E::Fr::from(N as u128).inverse().unwrap()).into_affine();
 
     let qa_com = VariableBaseMSM::multi_scalar_mul(&gens_Q,
-                                                &scalars_A.into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
-    let qa_com = qa_com.mul(E::Fr::from(N as u128).inverse().unwrap()).into_affine();
+                                                &scalars_A.clone().into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
+    let qa_com = qa_com.into_affine().mul(E::Fr::from(N as u128).inverse().unwrap()).into_affine();
 
     // next we interpolate the B polynomial
     let mut evals_B: Vec<E::Fr> = Vec::new();
-    let f_vec_ff = example.f_vec.into_iter().map(|x| E::Fr::from(x as u128)).collect::<Vec<_>>();
+    let f_vec_ff = example.f_vec.clone().into_iter().map(|x| E::Fr::from(x as u128)).collect::<Vec<_>>();
     for i in 0usize..m_domain.size() {
         let val = E::Fr::one().div(beta + f_vec_ff[i]);
         evals_B.push(val);
     }
     let b_coeffs = m_domain.ifft(&evals_B);
-    let b_poly = DensePolynomial::<E::Fr>::from_coefficients_vec(b_coeffs);
+    let b_poly = DensePolynomial::<E::Fr>::from_coefficients_vec(b_coeffs.clone());
     let mut b0_coeffs: Vec<E::Fr> = Vec::new();
     for i in 1..b_poly.degree() {
         b0_coeffs.push(b_coeffs[i]);
@@ -270,9 +275,9 @@ fn compute_prover_round2<E: PairingEngine>(
     let mut gens_P: Vec<E::G1Affine> = Vec::new();
     let shift = N - 1 - (m_domain.size() - 2);
     for i in 0..scalars_P.len() {
-        gens_P.push(&pp.poly_ck.powers_of_g[shift + i]);
+        gens_P.push(pp.poly_ck.powers_of_g[shift + i]);
     }
-    let p_com = VariableBaseMSM::multi_scalar_mul(&gens_P, &scalars_P);
+    let p_com = VariableBaseMSM::multi_scalar_mul(&gens_P, &scalars_P).into_affine();
 
     // compute [A_0(X)] for A_0 = (A(X) - A(0))/X,
     let mut sum_A0 = E::Fr::zero();
@@ -312,15 +317,15 @@ pub fn compute_prover_round1<E: PairingEngine>(
     let N = h_domain.size();
     let mut scalars = Vec::<E::Fr>::new();
     let mut gelems: Vec<E::G1Affine> = Vec::new();
-    for iter in example.m_vec {
-        scalars.push(iter.1.mul(h_domain.element(iter.0)));
-        gelems.push(cq_pp.openings_z_h_poly[iter.0])
+    for iter in &example.m_vec {
+        scalars.push(iter.1.mul(h_domain.element(*iter.0)));
+        gelems.push(cq_pp.openings_z_h_poly[*iter.0])
     }
 
     let phi_com = VariableBaseMSM::multi_scalar_mul(&gelems,
-                                                    &scalars.into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
+                                                    &scalars.clone().into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
 
-    let phi_com = phi_com.mul(E::Fr::from(N as u128).inverse().unwrap()).into_affine();
+    let phi_com = phi_com.into_affine().mul(E::Fr::from(N as u128).inverse().unwrap()).into_affine();
     CqLookupInputRound1 { phi_com }
 }
 
@@ -683,8 +688,8 @@ mod tests {
     use crate::ramlookup::caulkplus::generate_caulkplus_prover_input;
     use super::*;
 
-    const h_domain_size: usize = 10;
-    const m_domain_size: usize = 4;
+    const h_domain_size: usize = 22;
+    const m_domain_size: usize = 9;
 
     #[test]
     pub fn test_cq_public_params() {
