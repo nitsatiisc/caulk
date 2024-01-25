@@ -2,7 +2,7 @@ use std::time::Instant;
 use ark_ff::PrimeField;
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial, UVPolynomial};
 use ark_poly::univariate::DensePolynomial;
-use crate::{compute_vanishing_poly, compute_vanishing_poly_with_subproducts, fast_poly_evaluate, fast_poly_evaluate_with_pp, fast_poly_interpolate, fast_poly_interpolate_with_pp};
+use crate::{compute_vanishing_poly, compute_vanishing_poly_with_subproducts, fast_poly_evaluate, fast_poly_evaluate_with_pp, fast_poly_interpolate, fast_poly_interpolate_with_pp, InvertPolyCache};
 
 #[allow(non_snake_case)]
 pub struct UpdateParamsSetK<F: PrimeField> {
@@ -17,7 +17,7 @@ pub struct UpdateParamsSetK<F: PrimeField> {
 
 #[allow(non_snake_case)]
 impl<F: PrimeField> UpdateParamsSetK<F> {
-    pub fn new(set_k: &Vec<usize>, h_domain_size: usize) -> Self {
+    pub fn new(set_k: &Vec<usize>, h_domain_size: usize, cache: &mut InvertPolyCache<F>) -> Self {
         let h_domain: GeneralEvaluationDomain<F> = GeneralEvaluationDomain::new(1 << h_domain_size).unwrap();
         let mut set_hk: Vec<F> = Vec::new();
         for i in 0..set_k.len() {
@@ -29,7 +29,7 @@ impl<F: PrimeField> UpdateParamsSetK<F> {
             zk_dvt_vec.push(F::from(i as u128) * zk_poly.coeffs[i]);
         }
         let zk_dvt_poly = DensePolynomial::<F>::from_coefficients_vec(zk_dvt_vec);
-        let zk_dvt_evals:Vec<F> = fast_poly_evaluate_with_pp(&zk_dvt_poly.coeffs, &set_hk, &sub_products);
+        let zk_dvt_evals:Vec<F> = fast_poly_evaluate_with_pp(&zk_dvt_poly.coeffs, &set_hk, &sub_products, cache);
 
         let mut fk_poly_vec: Vec<F> = Vec::new();
         for i in 2..=zk_poly.degree() {
@@ -115,7 +115,8 @@ pub fn compute_reciprocal_sum<F: PrimeField>(
 
     // Get set K params
     let mut start = Instant::now();
-    let update_params: UpdateParamsSetK<F> = UpdateParamsSetK::new(set_k, domain_size);
+    let mut cache = InvertPolyCache::<F>::new();
+    let update_params: UpdateParamsSetK<F> = UpdateParamsSetK::new(set_k, domain_size, &mut cache);
     println!("Computed update params in {} secs", start.elapsed().as_secs());
 
     // Get oracles for ZKHat and derivative
@@ -173,6 +174,18 @@ pub fn compute_reciprocal_sum<F: PrimeField>(
         e_evals_I.push(g_term.add(p_dvt_evals_I[i]) + r_term.neg());
     }
 
+    start = Instant::now();
+    let z_I = compute_vanishing_poly::<F>(&h_i_vec, 1);
+    let mut zi_dvt_coeffs: Vec<F> = Vec::new();
+    for i in 1..=z_I.degree() {
+        zi_dvt_coeffs.push(F::from(i as u128) * z_I.coeffs[i]);
+    }
+
+    let z_I_evals_K = fast_poly_evaluate_with_pp(zi_dvt_coeffs.as_slice(),
+                                                 &update_params.set_hk,
+                                                 &update_params.sub_products,
+                                                 &mut cache);
+    println!("Evaluated z_I_dvt on set H_K in {} secs", start.elapsed().as_secs());
     e_evals_I
 }
 
@@ -217,8 +230,8 @@ mod tests {
     fn test_reciprocal_sum_helper<E: PairingEngine>()
     {
         let h_domain_size = 20usize;
-        let i_set_size = 1usize << 6;
-        let k_set_size = 1usize << 12;
+        let i_set_size = 1usize << 8;
+        let k_set_size = 1usize << 17;
 
         let i_set = (0..i_set_size).into_iter().collect::<Vec<_>>();
         let k_set = (0..k_set_size).into_iter().collect::<Vec<_>>();

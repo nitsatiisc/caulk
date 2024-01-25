@@ -3,6 +3,7 @@
 // khovratovich. It is useful for preprocessing.
 // The full algorithm is described here https://github.com/khovratovich/Kate/blob/master/Kate_amortized.pdf
 
+use std::collections::HashMap;
 use std::fmt::DebugMap;
 use std::ops::{Add, Div, Mul, Neg, Sub};
 use ark_ec::{PairingEngine, ProjectiveCurve};
@@ -15,7 +16,18 @@ use ark_serialize::CanonicalSerialize;
 use std::time::{Instant};
 use ark_poly::univariate::DenseOrSparsePolynomial;
 
+pub struct InvertPolyCache<F: PrimeField> {
+    invert_poly_map: HashMap<(usize, usize), DensePolynomial<F>>,
+}
 
+impl<F: PrimeField> InvertPolyCache<F> {
+    pub fn new() -> Self {
+        let invert_poly_map: HashMap<(usize, usize), DensePolynomial<F>> = HashMap::new();
+        InvertPolyCache {
+            invert_poly_map
+        }
+    }
+}
 
 // We assume the size of set roots is a power of 2
 pub fn compute_vanishing_poly<F>(
@@ -154,6 +166,63 @@ where
     (quotient, remainder)
 }
 
+pub fn fast_div_poly_cache<F>(
+    poly_f_coeffs: &[F],
+    poly_g_index: usize,
+    sub_products: &Vec<DensePolynomial<F>>,
+    cache: &mut InvertPolyCache<F>
+) -> (DensePolynomial<F>, DensePolynomial<F>)
+    where
+        F: PrimeField
+{
+    let mut quotient: DensePolynomial<F> = DensePolynomial::zero();
+    let mut remainder: DensePolynomial<F> = DensePolynomial::zero();
+
+    let poly_f:DensePolynomial<F> = DensePolynomial::from_coefficients_vec(poly_f_coeffs.to_vec());
+    //let poly_g:DensePolynomial<F> = DensePolynomial::from_coefficients_vec(poly_g_coeffs.to_vec());
+    let poly_g = &sub_products[poly_g_index];
+    if poly_f.degree() < poly_g.degree() {
+        return (DensePolynomial::<F>::zero(), poly_f);
+    }
+
+    // for small degree polynomials, it is faster to do
+    // the naive division.
+    if poly_f.degree() < 1000 {
+        return DenseOrSparsePolynomial::divide_with_q_and_r(
+            &(&poly_f).into(),
+            &(poly_g).into()
+        ).unwrap();
+    }
+
+    let l = poly_f.degree() - poly_g.degree() + 1;
+    match cache.invert_poly_map.contains_key(&(poly_g_index, l)) {
+        true => { quotient = cache.invert_poly_map.get(&(poly_g_index, l)).unwrap().clone(); }
+        false => {
+            let poly_g_coeffs = &poly_g.coeffs;
+            let poly_f_rev_coeffs: Vec<F> = poly_f_coeffs.iter().copied().rev().collect::<Vec<F>>();
+            let poly_g_rev_coeffs: Vec<F> = poly_g_coeffs.iter().copied().rev().collect::<Vec<F>>();
+
+            let poly_inv_rev_g = fast_invert_poly(&poly_g_rev_coeffs, l);
+            let poly_f_rev: DensePolynomial<F> = DensePolynomial::from_coefficients_vec(poly_f_rev_coeffs);
+            quotient = &poly_f_rev * &poly_inv_rev_g;
+
+            let mut quotient_coeffs: Vec<F> = quotient.coeffs;
+            quotient_coeffs.resize(l,F::zero());
+            quotient_coeffs.reverse();
+            quotient = DensePolynomial::from_coefficients_vec(quotient_coeffs);
+            cache.invert_poly_map.insert((poly_g_index, l), quotient.clone());
+        }
+    }
+
+    // ensure that polynomial (reversed quotient) has the correct size
+    remainder = &poly_f + &(poly_g * &quotient).neg();
+
+    (quotient, remainder)
+}
+
+
+
+
 
 pub fn fast_poly_evaluate<F>(
     coeffs: &[F],
@@ -204,6 +273,8 @@ pub fn fast_poly_evaluate_with_pp<F>(
     coeffs: &[F],
     points: &[F],
     sub_products: &Vec<DensePolynomial<F>>,
+    cache: &mut InvertPolyCache<F>,
+
 ) -> Vec<F> where
     F: PrimeField
 {
@@ -220,7 +291,7 @@ pub fn fast_poly_evaluate_with_pp<F>(
 
     let mut start = Instant::now();
     for i in 1usize..(2*r-1) {
-        let (_, rem) = fast_div_poly(&evaluation_polys[(i-1)/2].coeffs, &sub_products[i].coeffs );
+        let (_, rem) = fast_div_poly_cache(&evaluation_polys[(i-1)/2].coeffs, i, sub_products, cache);
         evaluation_polys[i] = rem;
     }
     println!("Time for divisions = {}", start.elapsed().as_secs());

@@ -281,18 +281,34 @@ pub fn verify_committed_index_lookup_proof<E: PairingEngine>(
 
 impl<E: PairingEngine> CaulkPlusProverInput<E> {
     // store the prover input in a file
-    pub fn store(&self, path: &str) {
+    pub fn store(&self, h_domain_size: usize) {
+        let path = format!(
+            "polys/poly_{}_openings_{}_{}.setup",
+            "tbl",
+            1usize << h_domain_size,
+            E::Fq::size_in_bits()
+        );
+
+
         let table: TableInput<E> = TableInput {
             c_poly: self.t_poly.clone(),
             c_com: self.t_com.clone(),
             openings: self.openings_t_poly.clone()
         };
-        table.store(path);
+        table.store(&path);
 
     }
 
     // load prover input from a file
-    pub fn load(path: &str) -> CaulkPlusProverInput<E> {
+    pub fn load(h_domain_size: usize) -> CaulkPlusProverInput<E> {
+        let path = format!(
+            "polys/poly_{}_openings_{}_{}.setup",
+            "tbl",
+            1usize << h_domain_size,
+            E::Fq::size_in_bits()
+        );
+
+
         let table = TableInput::<E>::load(&path);
 
         CaulkPlusProverInput {
@@ -684,8 +700,8 @@ mod tests {
     use ark_poly::{GeneralEvaluationDomain, Polynomial};
     use crate::multi::generate_lookup_input;
 
-    const h_domain_size: usize = 20;
-    const m_domain_size: usize = 8;
+    const h_domain_size: usize = 22;
+    const m_domain_size: usize = 10;
 
 
     #[test]
@@ -727,7 +743,10 @@ mod tests {
         // load caulk plus public parameters
         let caulk_pp = CaulkPlusPublicParams::<E>::load(h_domain_size);
         // generate table specific setup
-        let table_pp = generate_caulkplus_prover_input(&t_vec, &pp, h_domain_size);
+        //let table_pp = generate_caulkplus_prover_input(&t_vec, &pp, h_domain_size);
+        let table_pp = CaulkPlusProverInput::<E>::load(h_domain_size);
+
+        //let table_pp = CaulkPlusProverInput::load(h_domain_size);
         // generate an example instance
         let example = generate_committed_lookup_example::<E>(&t_vec, m_domain_size);
         // generate instance input for the prover
