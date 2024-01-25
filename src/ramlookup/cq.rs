@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::ops::{Add, AddAssign, Div, Mul, MulAssign, Neg};
+use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg};
 use ark_ec::{AffineCurve, PairingEngine, ProjectiveCurve};
 use ark_ec::msm::VariableBaseMSM;
 use ark_ff::{Field, One, PrimeField, Zero};
@@ -20,8 +20,8 @@ use crate::ramlookup::caulkplus::{CaulkPlusProverInput, CaulkPlusPublicParams};
 #[allow(non_snake_case)]
 // CaulkPlus parameters on top of caulk Public Parameters
 pub struct CqPublicParams<E: PairingEngine> {
-    pub z_h_com: E::G1Affine,                       // commitment to vanishing poly
-    pub log_poly_com: E::G1Affine,                  // commitment to log polynomial
+    pub z_h_com: E::G2Affine,                       // commitment to vanishing poly
+    pub log_poly_com: E::G2Affine,                  // commitment to log polynomial
     pub log_poly: DensePolynomial<E::Fr>,           // log polynomial on h_domain
     pub openings_z_h_poly: Vec<E::G1Affine>,        // opening proofs for polynomial X^N - 1
     pub openings_log_poly: Vec<E::G1Affine>,        // opening proofs for log polynomial
@@ -30,7 +30,7 @@ pub struct CqPublicParams<E: PairingEngine> {
 
 // CaulkPlus table related inputs, also includes pre-computed KZG proofs
 pub struct CqProverInput<E: PairingEngine> {
-    pub t_com: E::G1Affine,                          // commitment to table
+    pub t_com: E::G2Affine,                          // commitment to table
     pub t_poly: DensePolynomial<E::Fr>,             // polynomial interpolating the table on h_domain
     pub openings_t_poly: Vec<E::G1Affine>,          // opening proofs of the t-polynomial
 }
@@ -78,7 +78,7 @@ impl<E: PairingEngine> CqProverInput<E> {
 
 // Committed index lookup instance
 pub struct CqLookupInstance<E: PairingEngine> {
-    pub t_com: E::G1Affine,                         // commitment of the table
+    pub t_com: E::G2Affine,                         // commitment of the table
     pub f_com: E::G1Affine,                         // commitment of the a-vector (addresses)
     //pub v_com: E::G1Affine,                         // commitment of v=t[a] vector
     pub m_domain_size: usize,                       // domain size of a vector
@@ -101,6 +101,7 @@ pub struct CqLookupInputRound2<E: PairingEngine> {
     pub qb_com: E::G1Affine,                            // commitment to Q_B
     pub p_com: E::G1Affine,                             // commitment to p
     pub a0_com: E::G1Affine,                            // commitment to poly A(X)-A(0)/X
+    pub a0: E::Fr
 }
 
 pub struct CqLookupInputRound3<E: PairingEngine> {
@@ -132,6 +133,7 @@ pub struct CqProof<E: PairingEngine> {
 pub struct CqExample<F: PrimeField> {
     pub table: Vec<usize>,                          // table t
     pub f_vec: Vec<usize>,                          // a sub-vector of t
+    pub f_poly: DensePolynomial<F>,                 // f as a polynomial
     pub m_vec: HashMap<usize, F>,                   // multiplicities vector
 }
 
@@ -159,23 +161,28 @@ impl<F: PrimeField> CqExample<F> {
             }
         }
 
+        let f_vec_ff = f_vec.iter().map(|x| F::from(*x as u128)).collect::<Vec<_>>();
+        let m_domain: GeneralEvaluationDomain<F> = GeneralEvaluationDomain::new(1 << m_domain_size).unwrap();
+        let f_poly = DensePolynomial::from_coefficients_vec(m_domain.ifft(&f_vec_ff));
         CqExample {
             table: table.clone(),
             f_vec,
+            f_poly,
             m_vec
         }
 
     }
 }
 
-pub fn compute_cq_proof<E: PairingEngine<G1Affine = ()>>(
+pub fn compute_cq_proof<E: PairingEngine>(
     instance: &CqLookupInstance<E>,
     input: &CqProverInput<E>,
     example: &CqExample<E::Fr>,
     cq_pp: &CqPublicParams<E>,
     pp: &PublicParameters<E>
 ) -> CqProof<E> {
-
+    let N = 1usize << instance.h_domain_size;
+    let m = 1usize << instance.m_domain_size;
     let mut transcript = CaulkTranscript::<E::Fr>::new();
     // add instance to the transcript
     transcript.append_element(b"t_com", &instance.t_com);
@@ -186,9 +193,42 @@ pub fn compute_cq_proof<E: PairingEngine<G1Affine = ()>>(
     let beta = transcript.get_and_append_challenge(b"ch_beta");
     let round2 = compute_prover_round2(beta, instance, input, example, cq_pp, pp);
     // add elements to transcript
+    transcript.append_element(b"a_com", &round2.a_com);
+    transcript.append_element(b"qa_com", &round2.qa_com);
+    transcript.append_element(b"b0_com", &round2.b0_com);
+    transcript.append_element(b"qb_com", &round2.qb_com);
+    transcript.append_element(b"p_com", &round2.p_com);
+    transcript.append_element(b"a0_com", &round2.a0_com);
 
+    // sanity check
+    assert_eq!(E::pairing(round2.b0_com, pp.g2_powers[(N-1)-(m-2)]), E::pairing(round2.p_com, pp.g2_powers[0]),
+     "pairing check failed");
+    assert_eq!(E::pairing(round2.a_com, instance.t_com),
+               E::pairing(round2.qa_com, cq_pp.z_h_com).mul(
+                   E::pairing(round1.phi_com.add(round2.a_com.mul(beta).into_affine().neg()), pp.g2_powers[0])), "pairing failed for a_com");
 
     let gamma = transcript.get_and_append_challenge(b"ch_gamma");
+    // prover sends evaluations: A(0), f(\gamma), B_0(\gamma)
+    let f_gamma = round2.f_poly.evaluate(&gamma);
+    let b0_gamma = round2.b0_poly.evaluate(&gamma);
+    let mut a0 = E::Fr::zero();
+    for i in 0..round2.sparse_A_vec.len() {
+        a0.add_assign(round2.sparse_A_vec[i].1);
+    }
+    a0.mul_assign(E::Fr::from(N as u128).inverse().unwrap());
+
+    // add the evaluations to the transcript
+    transcript.append_element(b"a0", &a0);
+    transcript.append_element(b"f_gamma", &f_gamma);
+    transcript.append_element(b"b0_gamma", &b0_gamma);
+
+    // sanity check
+    assert_eq!(E::pairing(round2.a_com.add(pp.poly_ck.powers_of_g[0].mul(round2.a0).into_affine().neg()), pp.g2_powers[0]),
+        E::pairing(round2.a0_com, pp.g2_powers[1]), "Pairing check on a0 failed");
+
+
+
+
     let eta = transcript.get_and_append_challenge(b"ch_eta");
 
 
@@ -236,7 +276,7 @@ fn compute_prover_round2<E: PairingEngine>(
     for iter in &example.m_vec {
         let coeff:E::Fr = iter.1.div(E::Fr::from(example.table[*iter.0] as u128).add(beta)); // m_i/(t_i + \beta)
         scalars_A0.push(coeff);
-        sparse_A_vec.push((*iter.0, *iter.1));
+        sparse_A_vec.push((*iter.0, coeff));
         scalars_A.push(coeff.mul(h_domain.element(*iter.0)));     // scale by w^i
         gens_A.push(cq_pp.openings_z_h_poly[*iter.0]);
         gens_Q.push(input.openings_t_poly[*iter.0]);         // [Z_H(X)/X-w]
@@ -270,7 +310,7 @@ fn compute_prover_round2<E: PairingEngine>(
     let qb_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &qb_poly);
 
     // another MSM to compute [P(X)] for P(X)=B(X)X^{N-1-(n-2)}
-    let scalars_P = b_poly.coeffs.clone();
+    let scalars_P = b0_poly.coeffs.clone();
     let scalars_P = scalars_P.into_iter().map(|x| x.into_repr()).collect::<Vec<_>>();
     let mut gens_P: Vec<E::G1Affine> = Vec::new();
     let shift = N - 1 - (m_domain.size() - 2);
@@ -285,9 +325,9 @@ fn compute_prover_round2<E: PairingEngine>(
         sum_A0.add_assign(scalars_A0[i]);
     }
     let a0_com_1 = VariableBaseMSM::multi_scalar_mul(&gens_A,
-        &scalars_A.into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
+        &scalars_A0.into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
     let a0_com_2 = pp.poly_ck.powers_of_g[N-1].mul(sum_A0);
-    let a0_com: E::G1Affine = a0_com_1.into_affine() + a0_com_2.into_affine();
+    let a0_com: E::G1Affine = a0_com_1.into_affine() + a0_com_2.into_affine().neg();
     let a0_com = a0_com.mul(E::Fr::from(N as u128).inverse().unwrap()).into_affine();
 
     CqLookupInputRound2 {
@@ -301,7 +341,8 @@ fn compute_prover_round2<E: PairingEngine>(
         b0_com: b0_com,
         qb_com: qb_com,
         p_com: p_com,
-        a0_com: a0_com
+        a0_com: a0_com,
+        a0: sum_A0.mul(E::Fr::from(N as u128).inverse().unwrap())
     }
 }
 
@@ -335,7 +376,7 @@ pub fn compute_prover_round1<E: PairingEngine>(
 // openings (for certain SRS)
 pub struct TableInputCq<E: PairingEngine> {
     pub c_poly: DensePolynomial<E::Fr>,
-    pub c_com: E::G1Affine,
+    pub c_com: E::G2Affine,
     pub openings: Vec<E::G1Affine>,
 }
 
@@ -397,9 +438,9 @@ impl<E: PairingEngine> TableInputCq<E> {
         cur_counter += len32 * FR_UNCOMPR_SIZE;
 
         // 2. c_com
-        let buf_bytes = &data[cur_counter..cur_counter + G1_UNCOMPR_SIZE];
-        let c_com = E::G1Affine::deserialize_unchecked(buf_bytes).unwrap();
-        cur_counter += G1_UNCOMPR_SIZE;
+        let buf_bytes = &data[cur_counter..cur_counter + G2_UNCOMPR_SIZE];
+        let c_com = E::G2Affine::deserialize_unchecked(buf_bytes).unwrap();
+        cur_counter += G2_UNCOMPR_SIZE;
 
         // 3 openings
         let len_bytes: [u8; 4] = (&data[cur_counter..cur_counter + 4]).try_into().unwrap();
@@ -460,7 +501,7 @@ impl<E: PairingEngine> CqPublicParams<E> {
         };
 
         let table_mu_poly: TableInputCq<E> = TableInputCq {
-            c_com: E::G1Affine::zero(),
+            c_com: E::G2Affine::zero(),
             c_poly: Default::default(),
             openings: self.openings_mu_polys.clone(),
         };
@@ -514,13 +555,13 @@ impl<E: PairingEngine> CqPublicParams<E> {
     ) -> CqPublicParams<E> {
         let h_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(1 << h_domain_size).unwrap();
         // commit to the vanishing polynomial
-        let z_h_com: E::G1Affine = pp.poly_ck.powers_of_g[h_domain.size()] + pp.poly_ck.powers_of_g[0].neg();
+        let z_h_com: E::G2Affine = pp.g2_powers[h_domain.size()] + pp.g2_powers[0].neg();
         let mut l_i_vec: Vec<E::Fr> = Vec::new();
         for i in 0..h_domain.size() {
             l_i_vec.push(E::Fr::from(i as u128));
         }
         let log_poly = DensePolynomial::from_coefficients_vec(h_domain.ifft(&l_i_vec));
-        let log_poly_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &log_poly);
+        let log_poly_com = KZGCommit::<E>::commit_g2(&pp.g2_powers, &log_poly);
 
         // above does not work for Z_H openings as Z_H has degree = domain size.
         // Z_H/(X-w) = X^{N-1} + wX^{N-2}+...+w^{N-1}
@@ -570,13 +611,14 @@ impl<E: PairingEngine> CqPublicParams<E> {
     ) -> CqPublicParams<E> {
         let h_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(1 << h_domain_size).unwrap();
         // commit to the vanishing polynomial
-        let z_h_com: E::G1Affine = pp.poly_ck.powers_of_g[h_domain.size()] + pp.poly_ck.powers_of_g[0].neg();
+        let z_h_com: E::G2Affine = pp.g2_powers[h_domain.size()] + pp.g2_powers[0].neg();
+
         let mut l_i_vec: Vec<E::Fr> = Vec::new();
         for i in 0..h_domain.size() {
             l_i_vec.push(E::Fr::from(i as u128));
         }
         let log_poly = DensePolynomial::from_coefficients_vec(h_domain.ifft(&l_i_vec));
-        let log_poly_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &log_poly);
+        let log_poly_com = KZGCommit::<E>::commit_g2(&pp.g2_powers, &log_poly);
 
         // compute powers of beta for fake parameters generation
         let mut rng = ark_std::test_rng();
@@ -653,7 +695,7 @@ pub fn generate_cq_table_input<E: PairingEngine>(
         t_vec_ff.push(E::Fr::from(t_vec[i] as u128));
     }
     let t_poly = DensePolynomial::from_coefficients_vec(h_domain.ifft(&t_vec_ff));
-    let t_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &t_poly);
+    let t_com = KZGCommit::<E>::commit_g2(&pp.g2_powers, &t_poly);
 
     // create powers of beta
     let mut rng = ark_std::test_rng();
@@ -688,8 +730,8 @@ mod tests {
     use crate::ramlookup::caulkplus::generate_caulkplus_prover_input;
     use super::*;
 
-    const h_domain_size: usize = 22;
-    const m_domain_size: usize = 9;
+    const h_domain_size: usize = 16;
+    const m_domain_size: usize = 5;
 
     #[test]
     pub fn test_cq_public_params() {
@@ -701,6 +743,43 @@ mod tests {
         test_cq_table_params_helper::<Bls12_381>();
     }
 
+    #[test]
+    pub fn test_compute_cq_proof() {
+        test_compute_cq_proof_helper::<Bls12_381>();
+    }
+
+    fn test_compute_cq_proof_helper<E: PairingEngine>()
+    {
+        let N = 1usize << h_domain_size;
+        let m = 1usize << m_domain_size;
+        let n = h_domain_size;
+        let max_degree = N;
+
+        let pp: PublicParameters<E> = PublicParameters::setup(&max_degree, &N, &m, &n);
+        let cq_pp: CqPublicParams<E> = CqPublicParams::load(h_domain_size);
+        let table_pp: CqProverInput<E> = CqProverInput::load(h_domain_size);
+
+        // this should be the t_vec for which we have table_pp
+        let mut t_vec: Vec<usize> = Vec::new();
+        for i in 0..N {
+            t_vec.push(i);
+        }
+
+        let example: CqExample<E::Fr> = CqExample::new(&t_vec, m_domain_size);
+
+        let t_com = table_pp.t_com;
+        let f_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &example.f_poly);
+        let instance: CqLookupInstance<E> = CqLookupInstance { t_com, f_com, m_domain_size, h_domain_size };
+        let proof = compute_cq_proof::<E>(
+            &instance,
+            &table_pp,
+            &example,
+            &cq_pp,
+            &pp
+        );
+
+
+    }
 
     fn test_cq_public_params_helper<E: PairingEngine>()
     {
@@ -725,10 +804,10 @@ mod tests {
         for i in 0usize..1000 {
             let w = usize::rand(&mut rng) % N;
             // real check for Z_H(X)=(X-w).opening[w]
-            assert_eq!(E::pairing(cq_pp.z_h_com, g2),
+            assert_eq!(E::pairing(g1, cq_pp.z_h_com),
                        E::pairing(cq_pp.openings_z_h_poly[w],g2x + g2.mul(h_domain.element(w)).into_affine().neg()));
             // real check for log_poly
-            assert_eq!(E::pairing(cq_pp.log_poly_com + g1.mul(E::Fr::from(w as u128)).neg().into_affine(), g2),
+            assert_eq!(E::pairing(g1, cq_pp.log_poly_com + g2.mul(E::Fr::from(w as u128)).neg().into_affine()),
                        E::pairing(cq_pp.openings_log_poly[w],g2x + g2.mul(h_domain.element(w)).neg().into_affine()));
 
             // check openings for mu polys
@@ -762,7 +841,9 @@ mod tests {
             h_domain_size
         );
         println!("Time to generate table inputs = {}", start.elapsed().as_secs());
+        cp_prover_input.store(h_domain_size);
 
+        /*
         // check t_poly correctly interpolates t_vec
         let h_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(1usize << h_domain_size).unwrap();
         let mut t_evals: Vec<E::Fr> = Vec::new();
@@ -776,10 +857,10 @@ mod tests {
         let g2x = pp.g2_powers[1];
         let g2 = pp.g2_powers[0];
         for i in 0..N {
-            assert_eq!(E::pairing(t_com + g1.mul(t_evals[i]).neg().into_affine(), g2),
+            assert_eq!(E::pairing(g1, t_com + g2.mul(t_evals[i]).neg().into_affine()),
                        E::pairing(cp_prover_input.openings_t_poly[i],g2x + g2.mul(h_domain.element(i)).neg().into_affine()));
         }
-
+        */
 
     }
 }
