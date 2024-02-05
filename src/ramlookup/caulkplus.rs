@@ -701,7 +701,7 @@ mod tests {
     use crate::multi::generate_lookup_input;
 
     const h_domain_size: usize = 22;
-    const m_domain_size: usize = 10;
+    const m_domain_size: usize = 11;
 
 
     #[test]
@@ -771,7 +771,7 @@ mod tests {
             &caulk_pp,
             &pp
         );
-        println!("Generated committed index lookup proof in {} secs", start.elapsed().as_secs());
+        println!("Generated committed index lookup proof in {} secs", start.elapsed().as_millis());
         let res = verify_committed_index_lookup_proof(
             &instance,
             &proof,

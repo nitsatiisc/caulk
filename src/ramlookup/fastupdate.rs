@@ -137,7 +137,7 @@ pub fn compute_reciprocal_sum<F: PrimeField>(
         update_params.set_hk.as_slice(),
         q_evals_K.as_slice(),
         &update_params.zk_dvt_poly_evals,
-        &update_params.sub_products
+            &update_params.sub_products
     );
     println!("Interpolated q polynomial in {} secs", start.elapsed().as_secs());
 
@@ -229,9 +229,9 @@ mod tests {
 
     fn test_reciprocal_sum_helper<E: PairingEngine>()
     {
-        let h_domain_size = 20usize;
-        let i_set_size = 1usize << 8;
-        let k_set_size = 1usize << 17;
+        let h_domain_size = 22usize;
+        let i_set_size = 1usize << 7;
+        let k_set_size = 1usize << 14;
 
         let i_set = (0..i_set_size).into_iter().collect::<Vec<_>>();
         let k_set = (0..k_set_size).into_iter().collect::<Vec<_>>();
@@ -240,7 +240,7 @@ mod tests {
         let t_j_vec = k_set.clone();
         let mut start = Instant::now();
         let evals_I = compute_reciprocal_sum(&t_j_vec, &k_set, &i_set, &h_domain, h_domain_size);
-        println!("Efficient computation took {} secs", start.elapsed().as_secs());
+        println!("Efficient computation took {} secs", start.elapsed().as_millis());
 
         let mut start = Instant::now();
         let evals_I_naive = compute_reciprocal_sum_naive(&t_j_vec, &k_set, &i_set, &h_domain, h_domain_size);

@@ -105,12 +105,8 @@ pub struct CqLookupInputRound2<E: PairingEngine> {
 }
 
 pub struct CqLookupInputRound3<E: PairingEngine> {
-    pub b0_gamma: E::Fr,                                // evaluation of B0 at gamma
-    pub f_gamma: E::Fr,                                 // evaluation of f at gamma
-    pub a0: E::Fr,                                      // a0 = A(0)
     pub h_poly: DensePolynomial<E::Fr>,                 // h = B0 + \eta f + \eta^2 Q_B
     pub h_gamma: E::Fr,                                 // evaluation of h at gamma
-    pub a0_com: E::G1Affine,                            // commitment to polynomial A_0 = (A(X)-A(0))/X
     pub pi_h: E::G1Affine,                              // kzg proof of evaluation of h at gamma
 }
 
@@ -183,14 +179,18 @@ pub fn compute_cq_proof<E: PairingEngine>(
 ) -> CqProof<E> {
     let N = 1usize << instance.h_domain_size;
     let m = 1usize << instance.m_domain_size;
+    let m_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(m).unwrap();
+
     let mut transcript = CaulkTranscript::<E::Fr>::new();
     // add instance to the transcript
     transcript.append_element(b"t_com", &instance.t_com);
     transcript.append_element(b"f_com", &instance.f_com);
 
     let round1  = compute_prover_round1(example, instance.h_domain_size, cq_pp);
+    // phi_com commits to frequency polynomial (polynomial m(X) in the CQ paper).
     transcript.append_element(b"phi_com", &round1.phi_com);
     let beta = transcript.get_and_append_challenge(b"ch_beta");
+
     let round2 = compute_prover_round2(beta, instance, input, example, cq_pp, pp);
     // add elements to transcript
     transcript.append_element(b"a_com", &round2.a_com);
@@ -201,57 +201,141 @@ pub fn compute_cq_proof<E: PairingEngine>(
     transcript.append_element(b"a0_com", &round2.a0_com);
 
     // sanity check
-    assert_eq!(E::pairing(round2.b0_com, pp.g2_powers[(N-1)-(m-2)]), E::pairing(round2.p_com, pp.g2_powers[0]),
-     "pairing check failed");
-    assert_eq!(E::pairing(round2.a_com, instance.t_com),
-               E::pairing(round2.qa_com, cq_pp.z_h_com).mul(
-                   E::pairing(round1.phi_com.add(round2.a_com.mul(beta).into_affine().neg()), pp.g2_powers[0])), "pairing failed for a_com");
+    //assert_eq!(E::pairing(round2.b0_com, pp.g2_powers[(N-1)-(m-2)]), E::pairing(round2.p_com, pp.g2_powers[0]),
+    // "pairing check failed");
+    //assert_eq!(E::pairing(round2.a_com, instance.t_com),
+    //           E::pairing(round2.qa_com, cq_pp.z_h_com).mul(
+    //               E::pairing(round1.phi_com.add(round2.a_com.mul(beta).into_affine().neg()), pp.g2_powers[0])), "pairing failed for a_com");
 
     let gamma = transcript.get_and_append_challenge(b"ch_gamma");
     // prover sends evaluations: A(0), f(\gamma), B_0(\gamma)
     let f_gamma = round2.f_poly.evaluate(&gamma);
     let b0_gamma = round2.b0_poly.evaluate(&gamma);
-    let mut a0 = E::Fr::zero();
-    for i in 0..round2.sparse_A_vec.len() {
-        a0.add_assign(round2.sparse_A_vec[i].1);
-    }
-    a0.mul_assign(E::Fr::from(N as u128).inverse().unwrap());
 
     // add the evaluations to the transcript
-    transcript.append_element(b"a0", &a0);
+    transcript.append_element(b"a0", &round2.a0);
     transcript.append_element(b"f_gamma", &f_gamma);
     transcript.append_element(b"b0_gamma", &b0_gamma);
 
     // sanity check
-    assert_eq!(E::pairing(round2.a_com.add(pp.poly_ck.powers_of_g[0].mul(round2.a0).into_affine().neg()), pp.g2_powers[0]),
-        E::pairing(round2.a0_com, pp.g2_powers[1]), "Pairing check on a0 failed");
+    //assert_eq!(E::pairing(round2.a_com.add(pp.poly_ck.powers_of_g[0].mul(round2.a0).into_affine().neg()), pp.g2_powers[0]),
+    //    E::pairing(round2.a0_com, pp.g2_powers[1]), "Pairing check on a0 failed");
 
+    let eta = transcript.get_and_append_challenge(b"ch_eta");
+    let round3 = compute_prover_round3(gamma, eta, &round2, &pp);
+    /*
+    let b0 = E::Fr::from(N as u128).mul(round2.a0).div(E::Fr::from(m as u128));
+    let b_gamma: E::Fr = (b0_gamma*gamma).add(b0);
+    let qb_gamma:E::Fr = b_gamma.mul(f_gamma + beta) - E::Fr::one();
+    let zv_gamma = m_domain.evaluate_vanishing_polynomial(gamma);
+    let qb_gamma = qb_gamma.mul(zv_gamma.inverse().unwrap());
+    assert_eq!(round3.h_gamma, b0_gamma + f_gamma.mul(eta) + qb_gamma.mul(eta.square()), "poly identity failed");
+    */
+    CqProof::<E> {
+        phi_com: round1.phi_com,
+        a_com: round2.a_com,
+        qa_com: round2.qa_com,
+        b0_com: round2.b0_com,
+        qb_com: round2.qb_com,
+        p_com: round2.p_com,
+        b0_gamma: b0_gamma,
+        f_gamma: f_gamma,
+        a0: round2.a0,
+        h_gamma: round3.h_gamma,
+        a0_com: round2.a0_com,
+        pi_h: round3.pi_h,
+    }
 
+}
 
+pub fn verify_cq_proof<E: PairingEngine>(
+    instance: &CqLookupInstance<E>,
+    proof: &CqProof<E>,
+    cq_pp: &CqPublicParams<E>,
+    pp: &PublicParameters<E>,
+) -> bool {
+    let m_domain_size = instance.m_domain_size;
+    let h_domain_size = instance.h_domain_size;
+    let m = 1usize << m_domain_size;
+    let N: usize = 1usize << h_domain_size;
+    let m_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(m).unwrap();
+
+    let mut transcript: CaulkTranscript<E::Fr> = CaulkTranscript::new();
+    // add instance to the transcript
+    transcript.append_element(b"t_com", &instance.t_com);
+    transcript.append_element(b"f_com", &instance.f_com);
+    // add commitment to phi polynomial (m(X) in CQ paper).
+    transcript.append_element(b"phi_com", &proof.phi_com);
+    let beta = transcript.get_and_append_challenge(b"ch_beta");
+    // add round2 prover messages
+    transcript.append_element(b"a_com", &proof.a_com);
+    transcript.append_element(b"qa_com", &proof.qa_com);
+    transcript.append_element(b"b0_com", &proof.b0_com);
+    transcript.append_element(b"qb_com", &proof.qb_com);
+    transcript.append_element(b"p_com", &proof.p_com);
+    transcript.append_element(b"a0_com", &proof.a0_com);
+
+    let gamma = transcript.get_and_append_challenge(b"ch_gamma");
+    // add the evaluations to the transcript
+    transcript.append_element(b"a0", &proof.a0);
+    transcript.append_element(b"f_gamma", &proof.f_gamma);
+    transcript.append_element(b"b0_gamma", &proof.b0_gamma);
 
     let eta = transcript.get_and_append_challenge(b"ch_eta");
 
-
-    todo!();
-
-
-    /*
-    CqProof::<E> {
-        phi_com: (),
-        a_com: (),
-        qa_com: (),
-        b0_com: (),
-        qb_com: (),
-        p_com: (),
-        b0_gamma: (),
-        f_gamma: (),
-        a0: (),
-        h_gamma: (),
-        a0_com: (),
-        pi_h: (),
+    // verification checks
+    if E::pairing(proof.b0_com, pp.g2_powers[(N-1)-(m-2)]) != E::pairing(proof.p_com, pp.g2_powers[0]) {
+        println!("Degree check on poly B0 failed");
+        return false;
     }
 
-     */
+    if E::pairing(proof.a_com, instance.t_com) != E::pairing(proof.qa_com, cq_pp.z_h_com).mul(
+                   E::pairing(proof.phi_com.add(proof.a_com.mul(beta).into_affine().neg()), pp.g2_powers[0])) {
+        println!("The poly identity for Q_A(X) failed");
+        return false;
+    }
+
+    if E::pairing(proof.a_com.add(pp.poly_ck.powers_of_g[0].mul(proof.a0).into_affine().neg()), pp.g2_powers[0]) !=
+                   E::pairing(proof.a0_com, pp.g2_powers[1]) {
+        println!("The check A_0(X) = (A(X) - A(0))/X failed");
+        return false;
+    }
+
+    let b0 = E::Fr::from(N as u128).mul(proof.a0).div(E::Fr::from(m as u128));
+    let b_gamma: E::Fr = (proof.b0_gamma*gamma).add(b0);
+    let qb_gamma:E::Fr = b_gamma.mul(proof.f_gamma + beta) - E::Fr::one();
+    let zv_gamma = m_domain.evaluate_vanishing_polynomial(gamma);
+    let qb_gamma = qb_gamma.mul(zv_gamma.inverse().unwrap());
+    if proof.h_gamma != proof.b0_gamma + proof.f_gamma.mul(eta) + qb_gamma.mul(eta.square()) {
+        println!("Evaluation for h(X) failed");
+        return false;
+    }
+
+    true
+}
+
+
+fn compute_prover_round3<E: PairingEngine>(
+    gamma: E::Fr,
+    eta: E::Fr,
+    round2: &CqLookupInputRound2<E>,
+    pp: &PublicParameters<E>,
+) -> CqLookupInputRound3<E> {
+    // Compute aggregated poly H(X) = B_0(X) + eta f(X) + eta^2 Q_B(X)
+    // and provide a KZG proof of evaluation of H(X) at X=gamma.
+    let h_poly = &round2.b0_poly + &(&round2.f_poly.mul(eta) + &round2.qb_poly.mul(eta.square()));
+    let (h_gamma, pi_h) = KZGCommit::<E>::open_g1_batch(
+        &pp.poly_ck,
+        &h_poly,
+        None,
+        &[gamma]
+    );
+
+    CqLookupInputRound3::<E> {
+        h_poly: h_poly,
+        h_gamma: h_gamma[0],
+        pi_h: pi_h
+    }
 }
 
 fn compute_prover_round2<E: PairingEngine>(
@@ -262,11 +346,16 @@ fn compute_prover_round2<E: PairingEngine>(
     cq_pp: &CqPublicParams<E>,
     pp: &PublicParameters<E>) -> CqLookupInputRound2<E> {
 
-    // compute non-zero lagrange coefficients A_i = m_i/(t_i + \beta)
     let h_domain = GeneralEvaluationDomain::<E::Fr>::new(1 << instance.h_domain_size).unwrap();
     let m_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(1 << instance.m_domain_size).unwrap();
-
     let N = h_domain.size();
+    let m = m_domain.size();
+
+    // scalars_A will contain A_i.(w^i): This is because our openings are for [Z_H(X)/X-w^i] and not L_i(X)
+    // scalars_A0 will simply contain A_i's
+    // gens_A will contain respective openings [Z_H(X)/X-w^i]
+    // gens_Q will contain table openings [(T(X) - T(w^i))/(X-w^i)]
+    // sparse_A_vec simply stores tuples (i, A_i) for A_i\neq 0 for future use.
     let mut scalars_A: Vec<E::Fr> = Vec::new();
     let mut scalars_A0: Vec<E::Fr> = Vec::new();
     let mut gens_A: Vec<E::G1Affine> = Vec::new();
@@ -281,15 +370,17 @@ fn compute_prover_round2<E: PairingEngine>(
         gens_A.push(cq_pp.openings_z_h_poly[*iter.0]);
         gens_Q.push(input.openings_t_poly[*iter.0]);         // [Z_H(X)/X-w]
     }
+    // Compute commitment [A(X)] = \sum_{i}A_i[L_i(X)]. Scale by 1/N after the multi-exp
     let a_com = VariableBaseMSM::multi_scalar_mul(&gens_A,
                                                     &scalars_A.clone().into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
     let a_com = a_com.into_affine().mul(E::Fr::from(N as u128).inverse().unwrap()).into_affine();
 
+    // Compute commitment [Q_A(X)] = \sum_{i}A_i[Q_i(X)] where Q_i(X)=(T(X)-T(w^i))/(X-w^i). Scale by 1/N as before.
     let qa_com = VariableBaseMSM::multi_scalar_mul(&gens_Q,
                                                 &scalars_A.clone().into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
     let qa_com = qa_com.into_affine().mul(E::Fr::from(N as u128).inverse().unwrap()).into_affine();
 
-    // next we interpolate the B polynomial
+    // next we interpolate the B polynomial which evaluates to 1/(beta + f_i) on Z_V
     let mut evals_B: Vec<E::Fr> = Vec::new();
     let f_vec_ff = example.f_vec.clone().into_iter().map(|x| E::Fr::from(x as u128)).collect::<Vec<_>>();
     for i in 0usize..m_domain.size() {
@@ -298,12 +389,15 @@ fn compute_prover_round2<E: PairingEngine>(
     }
     let b_coeffs = m_domain.ifft(&evals_B);
     let b_poly = DensePolynomial::<E::Fr>::from_coefficients_vec(b_coeffs.clone());
+    // Compute coefficients of polynomial B_0(X) = (B(X) - B(0))/X
     let mut b0_coeffs: Vec<E::Fr> = Vec::new();
-    for i in 1..b_poly.degree() {
+    for i in 1..=b_poly.degree() {
         b0_coeffs.push(b_coeffs[i]);
     }
     let b0_poly = DensePolynomial::<E::Fr>::from_coefficients_vec(b0_coeffs);
     let b0_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &b0_poly);
+
+    // Compute f(X) and Q_B(X)
     let f_poly = DensePolynomial::<E::Fr>::from_coefficients_vec(m_domain.ifft(&f_vec_ff));
     let d_poly = &b_poly * &(&f_poly + &DensePolynomial::from_coefficients_vec(vec![beta]));
     let (qb_poly, _) = d_poly.divide_by_vanishing_poly(m_domain).unwrap();
@@ -319,7 +413,7 @@ fn compute_prover_round2<E: PairingEngine>(
     }
     let p_com = VariableBaseMSM::multi_scalar_mul(&gens_P, &scalars_P).into_affine();
 
-    // compute [A_0(X)] for A_0 = (A(X) - A(0))/X,
+    // compute [A_0(X)] for A_0 = (A(X) - A(0))/X. See CQ paper for how this is done.
     let mut sum_A0 = E::Fr::zero();
     for i in 0..scalars_A0.len() {
         sum_A0.add_assign(scalars_A0[i]);
@@ -707,11 +801,17 @@ pub fn generate_cq_table_input<E: PairingEngine>(
         power.mul_assign(beta);
     }
 
-
+    /*
     let openings_t_poly = KZGCommit::<E>::multiple_open_fake::<E::G1Affine>(
         &t_poly,
         powers.as_slice(),
         pp.poly_ck.powers_of_g[0],
+        h_domain_size
+    );
+    */
+    let openings_t_poly = KZGCommit::<E>::multiple_open::<E::G1Affine>(
+        &t_poly,
+        &pp.poly_ck.powers_of_g,
         h_domain_size
     );
 
@@ -730,8 +830,8 @@ mod tests {
     use crate::ramlookup::caulkplus::generate_caulkplus_prover_input;
     use super::*;
 
-    const h_domain_size: usize = 16;
-    const m_domain_size: usize = 5;
+    const h_domain_size: usize = 20;
+    const m_domain_size: usize = 11;
 
     #[test]
     pub fn test_cq_public_params() {
@@ -770,6 +870,7 @@ mod tests {
         let t_com = table_pp.t_com;
         let f_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &example.f_poly);
         let instance: CqLookupInstance<E> = CqLookupInstance { t_com, f_com, m_domain_size, h_domain_size };
+        let mut start = Instant::now();
         let proof = compute_cq_proof::<E>(
             &instance,
             &table_pp,
@@ -777,7 +878,13 @@ mod tests {
             &cq_pp,
             &pp
         );
-
+        println!("Time for proof generation: {}", start.elapsed().as_millis());
+        let res = verify_cq_proof(
+            &instance,
+            &proof,
+            &cq_pp,
+            &pp
+        );
 
     }
 

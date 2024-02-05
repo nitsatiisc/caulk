@@ -815,8 +815,8 @@ pub mod tests {
         //use ark_test_curves::bls12_381:
         //use E::G1Projective as GProjective;
         //use E::G1Affine as GAffine;
-
-        let vec_size: usize = 1024*1024;
+        let k_domain_size: usize = 19;
+        let vec_size: usize = 1024 + (1 << k_domain_size);
         let mut grp_vec: Vec<E::G1Affine> = Vec::new();
         let mut scalar_vec: Vec<<E::Fr as PrimeField>::BigInt> = Vec::new();
 
@@ -827,7 +827,7 @@ pub mod tests {
 
         let mut start = Instant::now();
         let prod = VariableBaseMSM::multi_scalar_mul(grp_vec.as_slice(), scalar_vec.as_slice());
-        println!("MSM took {} secs", start.elapsed().as_secs());
+        println!("MSM took {} secs", start.elapsed().as_millis());
         //println!("Product: {:?}", prod);
 
         let mut prod = E::G1Affine::zero();
