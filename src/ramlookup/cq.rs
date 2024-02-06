@@ -125,6 +125,12 @@ pub struct CqProof<E: PairingEngine> {
     pub pi_h: E::G1Affine,                              // evaluation proof for h(\gamma).
 }
 
+pub struct CqDeltaInput<E: PairingEngine> {
+    pub set_k: Vec<E::Fr>,                              // set K in the update protocol
+    pub t_j_vec: Vec<E::Fr>,                            // t_j for each j in K
+    pub i_set_size: usize,                              // first i_set_size positions in vec represent set I
+}
+
 // Generated with respect to a pre-processed table t
 pub struct CqExample<F: PrimeField> {
     pub table: Vec<usize>,                          // table t
@@ -173,6 +179,7 @@ impl<F: PrimeField> CqExample<F> {
 pub fn compute_cq_proof<E: PairingEngine>(
     instance: &CqLookupInstance<E>,
     input: &CqProverInput<E>,
+    delta: Option<&CqDeltaInput<E>>,            // input for using approximate setup
     example: &CqExample<E::Fr>,
     cq_pp: &CqPublicParams<E>,
     pp: &PublicParameters<E>
@@ -874,6 +881,7 @@ mod tests {
         let proof = compute_cq_proof::<E>(
             &instance,
             &table_pp,
+            None,
             &example,
             &cq_pp,
             &pp
