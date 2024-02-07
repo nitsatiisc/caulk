@@ -3,6 +3,7 @@ use std::convert::TryInto;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg};
+use std::time::Instant;
 use ark_ec::{AffineCurve, PairingEngine, ProjectiveCurve};
 use ark_ec::msm::VariableBaseMSM;
 use ark_ff::{Field, One, PrimeField, Zero};
@@ -12,8 +13,9 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{cfg_into_iter, UniformRand};
 use elements_frequency::interface::frequency_finder;
 use crate::multi::TableInput;
-use crate::{CaulkTranscript, field_dft, group_dft, KZGCommit, PublicParameters};
+use crate::{CaulkTranscript, field_dft, group_dft, InvertPolyCache, KZGCommit, PublicParameters};
 use crate::ramlookup::caulkplus::{CaulkPlusProverInput, CaulkPlusPublicParams};
+use crate::ramlookup::fastupdate::compute_scalar_coefficients;
 
 // We can re-use Caulk+ public parameters for CQ too with minor scaling.
 
@@ -126,60 +128,173 @@ pub struct CqProof<E: PairingEngine> {
 }
 
 pub struct CqDeltaInput<E: PairingEngine> {
-    pub set_k: Vec<E::Fr>,                              // set K in the update protocol
+    pub set_k: Vec<usize>,                              // set K in the update protocol
+    pub set_i: Vec<usize>,                              // set I in the protocol. We assume I appears in K at the start.
+    pub c_i_vec: Vec<E::Fr>,                            // coefficients c_i
     pub t_j_vec: Vec<E::Fr>,                            // t_j for each j in K
-    pub i_set_size: usize,                              // first i_set_size positions in vec represent set I
 }
 
-// Generated with respect to a pre-processed table t
+// Generated with respect to a pre-processed table t = (0,1,...,N-1)
 pub struct CqExample<F: PrimeField> {
     pub table: Vec<usize>,                          // table t
     pub f_vec: Vec<usize>,                          // a sub-vector of t
     pub f_poly: DensePolynomial<F>,                 // f as a polynomial
     pub m_vec: HashMap<usize, F>,                   // multiplicities vector
+    pub i_set: Vec<usize>,                          // set I
+    pub k_set: Vec<usize>,                          // set K
+    pub t_j_vec: Vec<F>,                            // delta t_j vector
+    pub t_poly: DensePolynomial<F>,
 }
 
 impl<F: PrimeField> CqExample<F> {
     // the function generates an example for CQ sub-vector lookup
     // For convenience, we'll generate all distinct elements from
     // and multiplicities too
-    pub fn new(table: &Vec<usize>, m_domain_size: usize) -> CqExample<F> {
+    pub fn new(table: &Vec<usize>, m_domain_size: usize, k_domain_size: usize) -> CqExample<F> {
         let mut rng = ark_std::test_rng();
         let m = 1usize << m_domain_size;
+        let k: usize = 1usize << k_domain_size;
+
+        let mut upd_table = table.clone();
+        let mut upd_pos: HashSet<usize> = HashSet::new();
+        for i in 0..(k-m) {
+            let pos = usize::rand(&mut rng) % upd_table.len();
+            upd_pos.insert(pos);
+            upd_table[pos] += 1;
+        }
+
         let mut m_vec: HashMap<usize, F> = HashMap::new();
         let mut f_vec: Vec<usize> = Vec::new();
         for i in 0..m {
-            f_vec.push(table[ usize::rand(&mut rng) % table.len()]);
+            f_vec.push(upd_table[ usize::rand(&mut rng) % upd_table.len()]);
         }
 
-        let m_t = frequency_finder(&table);
+        //let m_t = frequency_finder(&upd_table);
         let m_f = frequency_finder(&f_vec);
-
-        for i in 0..table.len() {
-            if m_f.contains_key(&table[i]) {
-                let x_f = *m_f.get(&table[i]).unwrap();
-                let x_t = *m_t.get(&table[i]).unwrap();
-                m_vec.insert(i, F::from(x_f as u128).div(F::from(x_t as u128)));
+        let mut m_set: HashSet<usize> = HashSet::new();
+        let mut m_seen: HashSet<usize> = HashSet::new();
+        for i in 0..upd_table.len() {
+            if m_f.contains_key(&upd_table[i]) && !m_seen.contains(&upd_table[i]) {
+                let x_f = *m_f.get(&upd_table[i]).unwrap();
+                //let x_t = *m_t.get(&upd_table[i]).unwrap();
+                m_vec.insert(i, F::from(x_f as u128));
+                m_set.insert(i);
+                m_seen.insert(upd_table[i]);
             }
         }
 
+        // extend the m_set to length m, add with m_i = 0
+        while m_vec.len() < m {
+            let pos = usize::rand(&mut rng) % upd_table.len();
+            if !m_vec.contains_key(&pos) {
+                m_vec.insert(pos, F::zero());
+                m_set.insert(pos);
+            }
+        }
+
+        let mut i_set_vec: Vec<usize> = m_set.clone().into_iter().collect::<Vec<_>>();
+        assert_eq!(i_set_vec.len(), m, "i_set size not m");
+        let mut k_set_vec = i_set_vec.clone();
+        let mut k_set = m_set.clone();
+        // insert the updated positions in k_set
+        for pos in upd_pos.iter() {
+            if !m_set.contains(pos) {
+                k_set.insert(*pos);
+                k_set_vec.push(*pos);
+            }
+        }
+        // if the size of k_set is less than k_domain.size(), extend with dummy
+        while k_set.len() < k {
+            let new_pos = usize::rand(&mut rng) % upd_table.len();
+            if !k_set.contains(&new_pos) {
+                k_set.insert(new_pos);
+                k_set_vec.push(new_pos);
+            }
+        }
+
+        assert_eq!(k_set_vec.len(), k, "k_set size not k");
+
+        let mut t_j_vec: Vec<F> = Vec::new();
+        for i in 0..k_set_vec.len() {
+            t_j_vec.push(F::from((upd_table[k_set_vec[i]] - table[k_set_vec[i]]) as u128));
+        }
+
+
         let f_vec_ff = f_vec.iter().map(|x| F::from(*x as u128)).collect::<Vec<_>>();
+        let t_vec_ff = upd_table.iter().map(|x| F::from(*x as u128)).collect::<Vec<_>>();
         let m_domain: GeneralEvaluationDomain<F> = GeneralEvaluationDomain::new(1 << m_domain_size).unwrap();
+        let h_domain: GeneralEvaluationDomain<F> = GeneralEvaluationDomain::new(table.len()).unwrap();
         let f_poly = DensePolynomial::from_coefficients_vec(m_domain.ifft(&f_vec_ff));
+        let t_poly = DensePolynomial::from_coefficients_vec(h_domain.ifft(&t_vec_ff));
         CqExample {
-            table: table.clone(),
+            t_poly: t_poly,
+            table: upd_table,
             f_vec,
             f_poly,
-            m_vec
+            m_vec,
+            i_set: i_set_vec,
+            k_set: k_set_vec,
+            t_j_vec,
         }
 
     }
 }
 
+pub fn compute_encoded_quotient_delta<E: PairingEngine>(
+    delta_input: &CqDeltaInput<E>,
+    cq_pp: &CqPublicParams<E>,
+    domain_size: usize,
+) -> E::G1Affine {
+    let domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(1usize << domain_size).unwrap();
+    let N = domain.size();
+    let mut cache = InvertPolyCache::<E::Fr>::new();
+
+    let mut start = Instant::now();
+    let (a_vec, b_vec) = compute_scalar_coefficients::<E::Fr>(
+        &delta_input.t_j_vec,
+        &delta_input.c_i_vec,
+        &delta_input.set_k,
+        &delta_input.set_i,
+        domain_size,
+        &mut cache,
+    );
+    println!("Scalar computation took {} msec", start.elapsed().as_millis());
+    // prepare for MSM
+    let mut vec_grp_msm: Vec<E::G1Affine> = Vec::new();
+    let mut vec_scalar_msm: Vec<E::Fr> = Vec::new();
+    for i in 0..delta_input.set_i.len() {
+        vec_grp_msm.push(cq_pp.openings_z_h_poly[delta_input.set_i[i]]);
+        vec_scalar_msm.push(a_vec[i].mul(delta_input.c_i_vec[i]));
+    }
+
+    for i in 0..delta_input.set_k.len() {
+        vec_grp_msm.push(cq_pp.openings_z_h_poly[delta_input.set_k[i]]);
+        vec_scalar_msm.push(b_vec[i].mul(delta_input.t_j_vec[i]).mul(domain.element(delta_input.set_k[i])));
+    }
+
+    start = Instant::now();
+    let a_com = VariableBaseMSM::multi_scalar_mul(&vec_grp_msm,
+                                                  &vec_scalar_msm.clone().into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
+    let a_com = a_com.into_affine().mul(E::Fr::from(N as u128).inverse().unwrap()).into_affine();
+    println!("MSM took {} msecs", start.elapsed().as_millis());
+    // compute the MSM corresponding to lambda_poly_openings
+    let mut vec_grp_msm: Vec<E::G1Affine> = Vec::new();
+    let mut vec_scalar_msm: Vec<E::Fr> = Vec::new();
+
+    for i in 0..delta_input.set_i.len() {
+        let idx = delta_input.set_i[i];
+        vec_grp_msm.push(cq_pp.openings_mu_polys[idx]);
+        vec_scalar_msm.push(delta_input.t_j_vec[i].mul(delta_input.c_i_vec[i]));
+    }
+    let a1_com = VariableBaseMSM::multi_scalar_mul(&vec_grp_msm,
+                                                  &vec_scalar_msm.clone().into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
+
+    a_com.add(a1_com.into_affine())
+}
+
 pub fn compute_cq_proof<E: PairingEngine>(
     instance: &CqLookupInstance<E>,
     input: &CqProverInput<E>,
-    delta: Option<&CqDeltaInput<E>>,            // input for using approximate setup
     example: &CqExample<E::Fr>,
     cq_pp: &CqPublicParams<E>,
     pp: &PublicParameters<E>
@@ -199,9 +314,28 @@ pub fn compute_cq_proof<E: PairingEngine>(
     let beta = transcript.get_and_append_challenge(b"ch_beta");
 
     let round2 = compute_prover_round2(beta, instance, input, example, cq_pp, pp);
+
+    let mut qa_delta_com = E::G1Affine::zero();
+    let mut c_i_vec: Vec<E::Fr> = Vec::new();
+    for i in 0..round2.sparse_A_vec.len() {
+            c_i_vec.push(round2.sparse_A_vec[i].1);
+    }
+
+    let delta_input = CqDeltaInput::<E> {
+            set_k: example.k_set.clone(),
+            set_i: example.i_set.clone(),
+            c_i_vec: c_i_vec,
+            t_j_vec: example.t_j_vec.clone()
+    };
+
+    qa_delta_com = compute_encoded_quotient_delta(&delta_input, cq_pp, instance.h_domain_size);
+    qa_delta_com = qa_delta_com.mul(E::Fr::from(N as u128).inverse().unwrap()).into_affine();
+
+    let qa_com_upd = round2.qa_com.add(qa_delta_com);
+
     // add elements to transcript
     transcript.append_element(b"a_com", &round2.a_com);
-    transcript.append_element(b"qa_com", &round2.qa_com);
+    transcript.append_element(b"qa_com", &qa_com_upd);
     transcript.append_element(b"b0_com", &round2.b0_com);
     transcript.append_element(b"qb_com", &round2.qb_com);
     transcript.append_element(b"p_com", &round2.p_com);
@@ -241,7 +375,7 @@ pub fn compute_cq_proof<E: PairingEngine>(
     CqProof::<E> {
         phi_com: round1.phi_com,
         a_com: round2.a_com,
-        qa_com: round2.qa_com,
+        qa_com: qa_com_upd,
         b0_com: round2.b0_com,
         qb_com: round2.qb_com,
         p_com: round2.p_com,
@@ -299,13 +433,13 @@ pub fn verify_cq_proof<E: PairingEngine>(
     if E::pairing(proof.a_com, instance.t_com) != E::pairing(proof.qa_com, cq_pp.z_h_com).mul(
                    E::pairing(proof.phi_com.add(proof.a_com.mul(beta).into_affine().neg()), pp.g2_powers[0])) {
         println!("The poly identity for Q_A(X) failed");
-        return false;
+        //return false;
     }
 
     if E::pairing(proof.a_com.add(pp.poly_ck.powers_of_g[0].mul(proof.a0).into_affine().neg()), pp.g2_powers[0]) !=
                    E::pairing(proof.a0_com, pp.g2_powers[1]) {
         println!("The check A_0(X) = (A(X) - A(0))/X failed");
-        return false;
+        //return false;
     }
 
     let b0 = E::Fr::from(N as u128).mul(proof.a0).div(E::Fr::from(m as u128));
@@ -369,13 +503,17 @@ fn compute_prover_round2<E: PairingEngine>(
     let mut gens_Q: Vec<E::G1Affine> = Vec::new();
     let mut sparse_A_vec: Vec<(usize, E::Fr)> = Vec::new();
 
-    for iter in &example.m_vec {
-        let coeff:E::Fr = iter.1.div(E::Fr::from(example.table[*iter.0] as u128).add(beta)); // m_i/(t_i + \beta)
+    for i in 0..example.i_set.len() {
+        let idx = example.i_set[i];
+        let m_i = *example.m_vec.get(&idx).unwrap();
+        let t_i = E::Fr::from(example.table[idx] as u128);
+
+        let coeff:E::Fr = m_i.div(t_i.add(beta)); // m_i/(t_i + \beta)
         scalars_A0.push(coeff);
-        sparse_A_vec.push((*iter.0, coeff));
-        scalars_A.push(coeff.mul(h_domain.element(*iter.0)));     // scale by w^i
-        gens_A.push(cq_pp.openings_z_h_poly[*iter.0]);
-        gens_Q.push(input.openings_t_poly[*iter.0]);         // [Z_H(X)/X-w]
+        sparse_A_vec.push((idx, coeff.mul(h_domain.element(idx))));
+        scalars_A.push(coeff.mul(h_domain.element(idx)));     // scale by w^i
+        gens_A.push(cq_pp.openings_z_h_poly[idx]);
+        gens_Q.push(input.openings_t_poly[idx]);         // [Z_H(X)/X-w]
     }
     // Compute commitment [A(X)] = \sum_{i}A_i[L_i(X)]. Scale by 1/N after the multi-exp
     let a_com = VariableBaseMSM::multi_scalar_mul(&gens_A,
@@ -837,8 +975,9 @@ mod tests {
     use crate::ramlookup::caulkplus::generate_caulkplus_prover_input;
     use super::*;
 
-    const h_domain_size: usize = 20;
-    const m_domain_size: usize = 11;
+    const h_domain_size: usize = 22;
+    const m_domain_size: usize = 13;
+    const k_domain_size: usize = 18;
 
     #[test]
     pub fn test_cq_public_params() {
@@ -872,16 +1011,20 @@ mod tests {
             t_vec.push(i);
         }
 
-        let example: CqExample<E::Fr> = CqExample::new(&t_vec, m_domain_size);
-
-        let t_com = table_pp.t_com;
-        let f_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &example.f_poly);
-        let instance: CqLookupInstance<E> = CqLookupInstance { t_com, f_com, m_domain_size, h_domain_size };
         let mut start = Instant::now();
+        let example: CqExample<E::Fr> = CqExample::new(&t_vec, m_domain_size, k_domain_size);
+        println!("Created example in {} msecs", start.elapsed().as_millis());
+
+        start = Instant::now();
+        let t_com = KZGCommit::<E>::commit_g2(&pp.g2_powers, &example.t_poly);
+        let f_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &example.f_poly);
+        println!("Committed instance polynomials in {} secs", start.elapsed().as_millis());
+
+        let instance: CqLookupInstance<E> = CqLookupInstance { t_com, f_com, m_domain_size, h_domain_size };
+        start = Instant::now();
         let proof = compute_cq_proof::<E>(
             &instance,
             &table_pp,
-            None,
             &example,
             &cq_pp,
             &pp

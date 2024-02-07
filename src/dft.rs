@@ -263,7 +263,11 @@ pub fn fast_poly_evaluate<F>(
     println!("Time for divisions = {}", start.elapsed().as_secs());
 
     for i in 0..r {
-        evaluations.push(evaluation_polys[r-1+i].coeffs[0]);
+        if evaluation_polys[r-1+i].coeffs.len() > 0 {
+            evaluations.push(evaluation_polys[r - 1 + i].coeffs[0]);
+        } else {
+            evaluations.push(F::zero());
+        }
     }
 
     evaluations
@@ -297,7 +301,11 @@ pub fn fast_poly_evaluate_with_pp<F>(
     println!("Time for divisions = {}", start.elapsed().as_secs());
 
     for i in 0..r {
-        evaluations.push(evaluation_polys[r-1+i].coeffs[0]);
+        if evaluation_polys[r-1+i].coeffs.len() > 0 {
+            evaluations.push(evaluation_polys[r - 1 + i].coeffs[0]);
+        } else {
+            evaluations.push(F::zero());
+        }
     }
 
     evaluations

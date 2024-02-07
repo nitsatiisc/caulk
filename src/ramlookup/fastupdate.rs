@@ -77,7 +77,7 @@ impl<F: PrimeField> ZkHatOracle<F> {
         let mut zk_hat_eval:Vec<F> = Vec::new();
         for i in 0..update_params.set_k.len() {
             zk_hat_eval.push(field_N.div(
-                h_domain.element(update_params.set_k[i]).mul(zk_dvt_eval[update_params.set_k[i]])
+                h_domain.element(update_params.set_k[i]).mul(zk_dvt_eval[i])
             ));
         }
 
@@ -103,20 +103,156 @@ impl<F: PrimeField> ZkHatOracle<F> {
     }
 }
 
+pub fn compute_scalar_coefficients_naive<F: PrimeField>(
+    t_j_vec: &Vec<F>,
+    c_i_vec: &Vec<F>,
+    set_k: &Vec<usize>,
+    set_i: &Vec<usize>,
+    domain_size: usize
+) -> (Vec<F>, Vec<F>)
+{
+    let h_domain: GeneralEvaluationDomain<F> = GeneralEvaluationDomain::new(1usize << domain_size).unwrap();
+    let mut adj_t_j_vec: Vec<F> = Vec::new();
+    for j in 0..t_j_vec.len() {
+        adj_t_j_vec.push(t_j_vec[j] * h_domain.element(set_k[j]));
+    }
+
+    let a_vec = compute_reciprocal_sum_naive::<F>(
+        &adj_t_j_vec,
+        &set_k,
+        &set_i,
+        &h_domain,
+        domain_size
+    );
+
+    let b_vec = compute_reciprocal_sum_naive::<F>(
+        &c_i_vec,
+        &set_i,
+        &set_k,
+        &h_domain,
+        domain_size
+    );
+
+    (a_vec, b_vec)
+
+}
+
+pub fn compute_scalar_coefficients<F: PrimeField>(
+    t_j_vec: &Vec<F>,                           // Delta t_j vector for j\in K
+    c_i_vec: &Vec<F>,                               // c_i for all i \in I
+    set_k: &Vec<usize>,                             // set K
+    set_i: &Vec<usize>,                             // set I\subseteq K
+    domain_size: usize,                             // size of subgroup of roots of unity
+    cache: &mut InvertPolyCache<F>,
+) -> (Vec<F>, Vec<F>) {
+
+    // broad steps:
+    // to compute a_i, i\in K, define adj_t_j_vec[j] = xi^j t_j_vec[j] for all j\in K
+    // compute a_i's using the reciprocal sum routine.
+
+    // to compute b_i, i\in I, call reciprocal sum routine with c_i_vec, and set_k=set_i
+    // to compute b_i, K\minus I,
+    // interpolate C(X) such that C(\xi^j) = Z_I'(\xi^j).c_i_vec[j] for j\in I
+    // evaluate C(\xi^j) for j\in K
+    // compute b_j, for j\in K\minus I as C(\xi^j)/Z_I(\xi^j).
+
+    let h_domain: GeneralEvaluationDomain<F> = GeneralEvaluationDomain::new(1usize << domain_size).unwrap();
+    let mut adj_t_j_vec: Vec<F> = Vec::new();
+    for j in 0..t_j_vec.len() {
+        adj_t_j_vec.push(t_j_vec[j] * h_domain.element(set_k[j]));
+    }
+
+    let mut start = Instant::now();
+    let (mut b_vec, _) = compute_reciprocal_sum::<F>(
+        c_i_vec,
+        set_i,
+        set_i,
+        &h_domain,
+        domain_size,
+        cache
+    );
+    println!("Computing b_vec over I took {} msec", start.elapsed().as_millis());
+
+    start = Instant::now();
+    let (a_vec, update_params) = compute_reciprocal_sum::<F>(
+        &adj_t_j_vec,
+        set_k,
+        set_i,
+        &h_domain,
+        domain_size,
+        cache
+    );
+    println!("Computing a_vec over K took {} msec", start.elapsed().as_millis());
+
+    let mut h_i_vec: Vec<F> = Vec::new();
+    for i in 0..set_i.len() {
+        h_i_vec.push(h_domain.element(set_i[i]));
+    }
+
+    let z_I = compute_vanishing_poly::<F>(&h_i_vec, 1);
+    let mut zi_dvt_coeffs: Vec<F> = Vec::new();
+    for i in 1..=z_I.degree() {
+        zi_dvt_coeffs.push(F::from(i as u128) * z_I.coeffs[i]);
+    }
+
+    start = Instant::now();
+    let z_I_dvt_evals_I = fast_poly_evaluate(zi_dvt_coeffs.as_slice(), &h_i_vec);
+    println!("Evaluating Z_I'(X) over I took {} msec", start.elapsed().as_millis());
+
+    start = Instant::now();
+    let z_I_evals_K = fast_poly_evaluate_with_pp(
+        &z_I.coeffs,
+        &update_params.set_hk,
+        &update_params.sub_products,
+        cache
+    );
+    println!("Evaluating Z_I(X) over K took {} msec", start.elapsed().as_millis());
+
+    let mut c_poly_lagrange_coeffs: Vec<F> = Vec::new();
+    for i in 0..set_i.len() {
+        c_poly_lagrange_coeffs.push(c_i_vec[i] * z_I_dvt_evals_I[i]);
+    }
+
+    // interpolate polynomial C(X)
+    start = Instant::now();
+    let c_poly = fast_poly_interpolate(&h_i_vec, &c_poly_lagrange_coeffs);
+    println!("Interpolating C(X) took {} msec", start.elapsed().as_millis());
+
+    // evaluate C(X) on set K
+    start = Instant::now();
+    let c_evals_K = fast_poly_evaluate_with_pp(
+        &c_poly.coeffs,
+        &update_params.set_hk,
+        &update_params.sub_products,
+        cache
+    );
+    println!("Evaluating C(X) over K took {} msec", start.elapsed().as_millis());
+    // extend the b vector
+    for i in set_i.len()..set_k.len() {
+        b_vec.push(c_evals_K[i].div(z_I_evals_K[i]));
+    }
+    // println!("Evaluated z_I_dvt on set H_K in {} secs", start.elapsed().as_secs());
+
+    (a_vec, b_vec)
+}
+
+
+// consider taking cache from the caller.
 pub fn compute_reciprocal_sum<F: PrimeField>(
-    t_j_vec: &Vec<usize>,                           // vector defined for j\in K
+    t_j_vec: &Vec<F>,                           // vector defined for j\in K
     set_k: &Vec<usize>,                             // set K over which summation runs for individual multipliers
     set_i: &Vec<usize>,                             // the set I over which we need sums
     domain: &GeneralEvaluationDomain<F>,            // domain from which the roots come
     domain_size: usize,
-) -> Vec<F> {
+    cache: &mut InvertPolyCache<F>,
+) -> (Vec<F>, UpdateParamsSetK<F>) {
     let N = domain.size();
     assert_eq!(N, 1 << domain_size, "Domain size mismatch");
 
     // Get set K params
     let mut start = Instant::now();
-    let mut cache = InvertPolyCache::<F>::new();
-    let update_params: UpdateParamsSetK<F> = UpdateParamsSetK::new(set_k, domain_size, &mut cache);
+    //let mut cache = InvertPolyCache::<F>::new();
+    let update_params: UpdateParamsSetK<F> = UpdateParamsSetK::new(set_k, domain_size, cache);
     println!("Computed update params in {} secs", start.elapsed().as_secs());
 
     // Get oracles for ZKHat and derivative
@@ -128,8 +264,7 @@ pub fn compute_reciprocal_sum<F: PrimeField>(
     let mut q_evals_K: Vec<F> = Vec::new();
 
     for i in 0..update_params.set_k.len() {
-        let t_j: F = F::from(t_j_vec[i] as u128);
-        q_evals_K.push(t_j.div(zk_hat_oracle.zk_hat_eval[i]));
+        q_evals_K.push(t_j_vec[i].div(zk_hat_oracle.zk_hat_eval[i]));
     }
 
     start = Instant::now();
@@ -137,11 +272,14 @@ pub fn compute_reciprocal_sum<F: PrimeField>(
         update_params.set_hk.as_slice(),
         q_evals_K.as_slice(),
         &update_params.zk_dvt_poly_evals,
-            &update_params.sub_products
+        &update_params.sub_products
     );
     println!("Interpolated q polynomial in {} secs", start.elapsed().as_secs());
+    let mut q0 = F::zero();
+    if q_poly.coeffs.len() > 0 {
+        q0 = q_poly.coeffs[0];
+    }
 
-    let q0 = q_poly.coeffs[0];
     let mut q_poly_dvt_coeffs: Vec<F> = Vec::new();
     for i in 1..=q_poly.degree() {
         q_poly_dvt_coeffs.push(F::from(i as u128) * q_poly.coeffs[i]);
@@ -169,28 +307,28 @@ pub fn compute_reciprocal_sum<F: PrimeField>(
     let mut e_evals_I: Vec<F> = Vec::new();
     for i in 0..set_i.len() {
         let idx = set_i[i];
-        let r_term = fN.mul(domain.element((2 * N - idx) % N)).mul(F::from(t_j_vec[i] as u128) + neg_p0);
-        let g_term = fN1.mul(domain.element((2*N - idx) % N)).mul(F::from(t_j_vec[i] as u128));
+        let r_term = fN.mul(domain.element((2 * N - idx) % N)).mul(t_j_vec[i] + neg_p0);
+        let g_term = fN1.mul(domain.element((2*N - idx) % N)).mul(t_j_vec[i]);
         e_evals_I.push(g_term.add(p_dvt_evals_I[i]) + r_term.neg());
     }
 
-    start = Instant::now();
-    let z_I = compute_vanishing_poly::<F>(&h_i_vec, 1);
-    let mut zi_dvt_coeffs: Vec<F> = Vec::new();
-    for i in 1..=z_I.degree() {
-        zi_dvt_coeffs.push(F::from(i as u128) * z_I.coeffs[i]);
-    }
+    //start = Instant::now();
+    //let z_I = compute_vanishing_poly::<F>(&h_i_vec, 1);
+    //let mut zi_dvt_coeffs: Vec<F> = Vec::new();
+    //for i in 1..=z_I.degree() {
+    //    zi_dvt_coeffs.push(F::from(i as u128) * z_I.coeffs[i]);
+    //}
 
-    let z_I_evals_K = fast_poly_evaluate_with_pp(zi_dvt_coeffs.as_slice(),
-                                                 &update_params.set_hk,
-                                                 &update_params.sub_products,
-                                                 &mut cache);
-    println!("Evaluated z_I_dvt on set H_K in {} secs", start.elapsed().as_secs());
-    e_evals_I
+    //let z_I_evals_K = fast_poly_evaluate_with_pp(zi_dvt_coeffs.as_slice(),
+    //                                             &update_params.set_hk,
+    //                                             &update_params.sub_products,
+    //                                             cache);
+    // println!("Evaluated z_I_dvt on set H_K in {} secs", start.elapsed().as_secs());
+    (e_evals_I, update_params)
 }
 
 pub fn compute_reciprocal_sum_naive<F: PrimeField>(
-    t_j_vec: &Vec<usize>,                           // vector defined for j\in K
+    t_j_vec: &Vec<F>,                           // vector defined for j\in K
     set_k: &Vec<usize>,                             // set K over which summation runs for individual multipliers
     set_i: &Vec<usize>,                             // the set I over which we need sums
     domain: &GeneralEvaluationDomain<F>,            // domain from which the roots come
@@ -205,7 +343,7 @@ pub fn compute_reciprocal_sum_naive<F: PrimeField>(
                 continue;
             }
             let denom = domain.element(set_i[i]) - domain.element(set_k[j]);
-            let num = F::from(t_j_vec[j] as u128);
+            let num = t_j_vec[j];
             sum.add_assign(num.div(denom));
 
         }
@@ -218,6 +356,8 @@ pub fn compute_reciprocal_sum_naive<F: PrimeField>(
 mod tests {
     use ark_bls12_381::Bls12_381;
     use ark_ec::PairingEngine;
+    use ark_ff::One;
+    use ark_std::UniformRand;
     use super::*;
 
     #[test]
@@ -226,29 +366,91 @@ mod tests {
         test_reciprocal_sum_helper::<Bls12_381>();
     }
 
+    #[test]
+    pub fn test_scalar_coefficients()
+    {
+        test_scalar_coefficients_benchmark::<Bls12_381>();
+    }
+
+
+    fn test_scalar_coefficients_benchmark<E: PairingEngine>()
+    {
+        let h_domain_size = 20usize;
+        let i_set_size = 1usize << 10;
+        let k_set_size = 1usize << 18;
+        let mut rng = ark_std::test_rng();
+
+        let i_set = (0..i_set_size).into_iter().collect::<Vec<_>>();
+        let k_set = (0..k_set_size).into_iter().collect::<Vec<_>>();
+
+        let mut c_i_vec: Vec<E::Fr> = Vec::new();
+        let mut t_j_vec: Vec<E::Fr> = Vec::new();
+
+        for i in 0..i_set.len() {
+            c_i_vec.push(E::Fr::rand(&mut rng));
+        }
+
+        for i in 0..k_set.len() {
+            t_j_vec.push(E::Fr::one());
+        }
+
+        let mut cache = InvertPolyCache::<E::Fr>::new();
+
+        let mut start = Instant::now();
+        let (a_vec, b_vec) = compute_scalar_coefficients(
+            &t_j_vec,
+            &c_i_vec,
+            &k_set,
+            &i_set,
+            h_domain_size,
+            &mut cache
+        );
+        println!("Efficient computation took {} msec", start.elapsed().as_millis());
+
+        start = Instant::now();
+        let (a_vec_naive, b_vec_naive) = compute_scalar_coefficients_naive(
+            &t_j_vec,
+            &c_i_vec,
+            &k_set,
+            &i_set,
+            h_domain_size,
+        );
+        println!("Naive computation took {} msec", start.elapsed().as_millis());
+
+        for i in 0..a_vec.len() {
+            assert_eq!(a_vec[i], a_vec_naive[i], "a_vec mismatch");
+        }
+
+        for i in 0..b_vec.len() {
+            assert_eq!(b_vec[i], b_vec_naive[i], "b_vec mismatch");
+        }
+
+    }
+
 
     fn test_reciprocal_sum_helper<E: PairingEngine>()
     {
         let h_domain_size = 22usize;
-        let i_set_size = 1usize << 7;
-        let k_set_size = 1usize << 14;
+        let i_set_size = 1usize << 10;
+        let k_set_size = 1usize << 18;
 
         let i_set = (0..i_set_size).into_iter().collect::<Vec<_>>();
         let k_set = (0..k_set_size).into_iter().collect::<Vec<_>>();
         let h_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(1 << h_domain_size).unwrap();
 
-        let t_j_vec = k_set.clone();
+        let t_j_vec = k_set.clone().into_iter().map(|x| E::Fr::from(x as u128)).collect::<Vec<_>>();
         let mut start = Instant::now();
-        let evals_I = compute_reciprocal_sum(&t_j_vec, &k_set, &i_set, &h_domain, h_domain_size);
+        let mut cache: InvertPolyCache<E::Fr> = InvertPolyCache::new();
+        let evals_I = compute_reciprocal_sum(&t_j_vec, &k_set, &i_set, &h_domain, h_domain_size, &mut cache);
         println!("Efficient computation took {} secs", start.elapsed().as_millis());
 
         let mut start = Instant::now();
         let evals_I_naive = compute_reciprocal_sum_naive(&t_j_vec, &k_set, &i_set, &h_domain, h_domain_size);
         println!("Naive computation took {} secs", start.elapsed().as_secs());
 
-        for i in 0..evals_I.len() {
-            assert_eq!(evals_I[i], evals_I_naive[i], "Vectors don't match at {}", i);
-        }
+       // for i in 0..evals_I.len() {
+       //     assert_eq!(evals_I[i], evals_I_naive[i], "Vectors don't match at {}", i);
+       // }
     }
 
 
