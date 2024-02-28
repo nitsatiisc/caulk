@@ -1,6 +1,7 @@
 pub mod caulkplus;
 mod fastupdate;
 mod cq;
+mod rampoly;
 
 use std::marker::PhantomData;
 use std::ops::{Mul, Neg, Sub};
@@ -16,8 +17,7 @@ use crate::{multi::{
     LookupProverInput,
 }, KZGCommit, PublicParameters, CaulkTranscript, compute_vanishing_poly};
 use rand::{Rng, RngCore};
-
-
+use crate::ramlookup::cq::CqProof;
 
 
 pub struct CommittedRAM<E: PairingEngine> {
@@ -36,6 +36,14 @@ pub struct RAMTranscript<E: PairingEngine> {
     pub op_poly: DensePolynomial<E::Fr>,        // polynomial denoting operation column
     pub a_poly: DensePolynomial<E::Fr>,         // polynomial denoting address column
     pub v_poly: DensePolynomial<E::Fr>,         // polynomial denoting value column
+}
+
+#[derive(Clone, Debug)]
+pub struct RAMTranscriptCom<E: PairingEngine> {
+    pub ts_poly_com: E::G1Affine,
+    pub op_poly_com: E::G1Affine,
+    pub a_poly_com: E::G1Affine,
+    pub v_poly_com: E::G1Affine,
 }
 
 pub struct ProverInputCommon<E: PairingEngine> {
@@ -184,6 +192,46 @@ pub struct ProofConcat<E: PairingEngine> {
     pub pi_z: E::G1Affine,              // proof for evaluation of z
     pub pi_q: E::G1Affine,              // proof for evaluation of q
 }
+
+pub struct MonotonicTranscriptInstance<E: PairingEngine> {
+    pub tr_com: RAMTranscriptCom<E>,
+    pub m_domain_size: usize,
+    pub h_domain_size: usize,
+}
+
+pub struct ProofMonotonic<E: PairingEngine> {
+    pub z1_com: DensePolynomial<E::Fr>,
+    pub z2_com: DensePolynomial<E::Fr>,
+    pub delta_A_com: DensePolynomial<E::Fr>,
+    pub delta_T_com: DensePolynomial<E::Fr>,
+    pub q1_com: DensePolynomial<E::Fr>,
+    pub q2_com: DensePolynomial<E::Fr>,
+
+    pub val_A_s: E::Fr,
+    pub val_A_ws: E::Fr,
+    pub val_deltaA_s: E::Fr,
+    pub val_deltaT_s: E::Fr,
+    pub val_T_s: E::Fr,
+    pub val_T_ws: E::Fr,
+    pub val_op_s: E::Fr,
+    pub val_V_s: E::Fr,
+    pub val_V_ws: E::Fr,
+    pub val_Q1_s: E::Fr,
+    pub val_Q2_s: E::Fr,
+    pub val_Z1_s: E::Fr,
+    pub val_Z2_s: E::Fr,
+
+    pub pi_s: E::G1Affine,
+    pub pi_ws: E::G1Affine,
+
+    pub range_proof_A: CqProof<E>,
+    pub range_proof_deltaA: CqProof<E>,
+    pub range_proof_deltaT: CqProof<E>,
+    pub range_proof_t: CqProof<E>
+}
+
+
+
 
 pub fn compute_concat_proof<E: PairingEngine>(
     instance: &ConcatInstance<E>,
