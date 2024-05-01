@@ -66,7 +66,7 @@ impl<E: PairingEngine> CqProverInput<E> {
             E::Fq::size_in_bits()
         );
 
-
+        println!("path: {}", path);
         let table = TableInputCq::<E>::load(&path);
 
         CqProverInput {
@@ -238,6 +238,91 @@ impl<F: PrimeField> CqExample<F> {
         }
 
     }
+
+    pub fn new_fixed_subvec(table: &Vec<usize>, f_vec: &Vec<usize>, m_domain_size: usize, k_domain_size: usize) -> CqExample<F> {
+        let mut rng = ark_std::test_rng();
+        let m = 1usize << m_domain_size;
+        let k: usize = 1usize << k_domain_size;
+
+        let mut upd_table = table.clone();
+        let mut upd_pos: HashSet<usize> = HashSet::new();
+        for i in 0..(k-m) {
+            let pos = usize::rand(&mut rng) % upd_table.len();
+            upd_pos.insert(pos);
+            upd_table[pos] += 0;
+        }
+
+        let mut m_vec: HashMap<usize, F> = HashMap::new();
+
+        //let m_t = frequency_finder(&upd_table);
+        let m_f = frequency_finder(&f_vec);
+        let mut m_set: HashSet<usize> = HashSet::new();
+        let mut m_seen: HashSet<usize> = HashSet::new();
+        for i in 0..upd_table.len() {
+            if m_f.contains_key(&upd_table[i]) && !m_seen.contains(&upd_table[i]) {
+                let x_f = *m_f.get(&upd_table[i]).unwrap();
+                //let x_t = *m_t.get(&upd_table[i]).unwrap();
+                m_vec.insert(i, F::from(x_f as u128));
+                m_set.insert(i);
+                m_seen.insert(upd_table[i]);
+            }
+        }
+
+        // extend the m_set to length m, add with m_i = 0
+        while m_vec.len() < m {
+            let pos = usize::rand(&mut rng) % upd_table.len();
+            if !m_vec.contains_key(&pos) {
+                m_vec.insert(pos, F::zero());
+                m_set.insert(pos);
+            }
+        }
+
+        let mut i_set_vec: Vec<usize> = m_set.clone().into_iter().collect::<Vec<_>>();
+        assert_eq!(i_set_vec.len(), m, "i_set size not m");
+        let mut k_set_vec = i_set_vec.clone();
+        let mut k_set = m_set.clone();
+        // insert the updated positions in k_set
+        for pos in upd_pos.iter() {
+            if !m_set.contains(pos) {
+                k_set.insert(*pos);
+                k_set_vec.push(*pos);
+            }
+        }
+        // if the size of k_set is less than k_domain.size(), extend with dummy
+        while k_set.len() < k {
+            let new_pos = usize::rand(&mut rng) % upd_table.len();
+            if !k_set.contains(&new_pos) {
+                k_set.insert(new_pos);
+                k_set_vec.push(new_pos);
+            }
+        }
+
+        assert_eq!(k_set_vec.len(), k, "k_set size not k");
+
+        let mut t_j_vec: Vec<F> = Vec::new();
+        for i in 0..k_set_vec.len() {
+            t_j_vec.push(F::from((upd_table[k_set_vec[i]] - table[k_set_vec[i]]) as u128));
+        }
+
+
+        let f_vec_ff = f_vec.iter().map(|x| F::from(*x as u128)).collect::<Vec<_>>();
+        let t_vec_ff = upd_table.iter().map(|x| F::from(*x as u128)).collect::<Vec<_>>();
+        let m_domain: GeneralEvaluationDomain<F> = GeneralEvaluationDomain::new(1 << m_domain_size).unwrap();
+        let h_domain: GeneralEvaluationDomain<F> = GeneralEvaluationDomain::new(table.len()).unwrap();
+        let f_poly = DensePolynomial::from_coefficients_vec(m_domain.ifft(&f_vec_ff));
+        let t_poly = DensePolynomial::from_coefficients_vec(h_domain.ifft(&t_vec_ff));
+        CqExample {
+            t_poly: t_poly,
+            table: upd_table,
+            f_vec: f_vec.clone(),
+            f_poly,
+            m_vec,
+            i_set: i_set_vec,
+            k_set: k_set_vec,
+            t_j_vec,
+        }
+
+    }
 }
 
 pub fn compute_encoded_quotient_delta<E: PairingEngine>(
@@ -297,7 +382,8 @@ pub fn compute_cq_proof<E: PairingEngine>(
     input: &CqProverInput<E>,
     example: &CqExample<E::Fr>,
     cq_pp: &CqPublicParams<E>,
-    pp: &PublicParameters<E>
+    pp: &PublicParameters<E>,
+    update: bool
 ) -> CqProof<E> {
     let N = 1usize << instance.h_domain_size;
     let m = 1usize << instance.m_domain_size;
@@ -316,20 +402,22 @@ pub fn compute_cq_proof<E: PairingEngine>(
     let round2 = compute_prover_round2(beta, instance, input, example, cq_pp, pp);
 
     let mut qa_delta_com = E::G1Affine::zero();
-    let mut c_i_vec: Vec<E::Fr> = Vec::new();
-    for i in 0..round2.sparse_A_vec.len() {
+    if (update) {
+        let mut c_i_vec: Vec<E::Fr> = Vec::new();
+        for i in 0..round2.sparse_A_vec.len() {
             c_i_vec.push(round2.sparse_A_vec[i].1);
-    }
+        }
 
-    let delta_input = CqDeltaInput::<E> {
+        let delta_input = CqDeltaInput::<E> {
             set_k: example.k_set.clone(),
             set_i: example.i_set.clone(),
             c_i_vec: c_i_vec,
             t_j_vec: example.t_j_vec.clone()
-    };
+        };
 
-    qa_delta_com = compute_encoded_quotient_delta(&delta_input, cq_pp, instance.h_domain_size);
-    qa_delta_com = qa_delta_com.mul(E::Fr::from(N as u128).inverse().unwrap()).into_affine();
+        qa_delta_com = compute_encoded_quotient_delta(&delta_input, cq_pp, instance.h_domain_size);
+        qa_delta_com = qa_delta_com.mul(E::Fr::from(N as u128).inverse().unwrap()).into_affine();
+    }
 
     let qa_com_upd = round2.qa_com.add(qa_delta_com);
 
@@ -425,6 +513,7 @@ pub fn verify_cq_proof<E: PairingEngine>(
     let eta = transcript.get_and_append_challenge(b"ch_eta");
 
     // verification checks
+    let mut start = Instant::now();
     if E::pairing(proof.b0_com, pp.g2_powers[(N-1)-(m-2)]) != E::pairing(proof.p_com, pp.g2_powers[0]) {
         println!("Degree check on poly B0 failed");
         return false;
@@ -452,6 +541,7 @@ pub fn verify_cq_proof<E: PairingEngine>(
         return false;
     }
 
+    println!("Verification took {} ms", start.elapsed().as_millis());
     true
 }
 
@@ -487,8 +577,10 @@ fn compute_prover_round2<E: PairingEngine>(
     cq_pp: &CqPublicParams<E>,
     pp: &PublicParameters<E>) -> CqLookupInputRound2<E> {
 
+    // compute non-zero lagrange coefficients A_i = m_i/(t_i + \beta)
     let h_domain = GeneralEvaluationDomain::<E::Fr>::new(1 << instance.h_domain_size).unwrap();
     let m_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(1 << instance.m_domain_size).unwrap();
+
     let N = h_domain.size();
     let m = m_domain.size();
 
@@ -975,9 +1067,9 @@ mod tests {
     use crate::ramlookup::caulkplus::generate_caulkplus_prover_input;
     use super::*;
 
-    const h_domain_size: usize = 22;
-    const m_domain_size: usize = 13;
-    const k_domain_size: usize = 18;
+    const h_domain_size: usize = 10;
+    const m_domain_size: usize = 2;
+    const k_domain_size: usize = 4;
 
     #[test]
     pub fn test_cq_public_params() {
@@ -1027,15 +1119,19 @@ mod tests {
             &table_pp,
             &example,
             &cq_pp,
-            &pp
+            &pp,
+            true
         );
-        println!("Time for proof generation: {}", start.elapsed().as_millis());
-        let res = verify_cq_proof(
+
+        // verify the proof
+        let result = verify_cq_proof::<E>(
             &instance,
             &proof,
             &cq_pp,
-            &pp
+            &pp,
         );
+
+        println!("Verification Result [ {} ]", result);
 
     }
 

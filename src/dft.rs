@@ -17,14 +17,19 @@ use std::time::{Instant};
 use ark_poly::univariate::DenseOrSparsePolynomial;
 
 pub struct InvertPolyCache<F: PrimeField> {
-    invert_poly_map: HashMap<(usize, usize), DensePolynomial<F>>,
+    pub invert_poly_map: HashMap<(usize, usize), DensePolynomial<F>>,
+    pub cache_hits: usize,
+    pub cache_miss: usize
 }
 
 impl<F: PrimeField> InvertPolyCache<F> {
     pub fn new() -> Self {
         let invert_poly_map: HashMap<(usize, usize), DensePolynomial<F>> = HashMap::new();
         InvertPolyCache {
-            invert_poly_map
+            invert_poly_map,
+            cache_hits: 0usize,
+            cache_miss: 0usize,
+
         }
     }
 }
@@ -185,19 +190,23 @@ pub fn fast_div_poly_cache<F>(
         return (DensePolynomial::<F>::zero(), poly_f);
     }
 
-    // for small degree polynomials, it is faster to do
-    // the naive division.
-    if poly_f.degree() < 1000 {
-        return DenseOrSparsePolynomial::divide_with_q_and_r(
-            &(&poly_f).into(),
-            &(poly_g).into()
-        ).unwrap();
-    }
 
     let l = poly_f.degree() - poly_g.degree() + 1;
     match cache.invert_poly_map.contains_key(&(poly_g_index, l)) {
-        true => { quotient = cache.invert_poly_map.get(&(poly_g_index, l)).unwrap().clone(); }
+        true => { quotient = cache.invert_poly_map.get(&(poly_g_index, l)).unwrap().clone(); cache.cache_hits += 1; }
         false => {
+            // for small degree polynomials, it is faster to do
+            // the naive division.
+            cache.cache_miss += 1;
+            if poly_f.degree() < 1000 {
+                (quotient, remainder) = DenseOrSparsePolynomial::divide_with_q_and_r(
+                    &(&poly_f).into(),
+                    &(poly_g).into()
+                ).unwrap();
+                cache.invert_poly_map.insert((poly_g_index, l), quotient.clone());
+                return (quotient, remainder);
+            }
+
             let poly_g_coeffs = &poly_g.coeffs;
             let poly_f_rev_coeffs: Vec<F> = poly_f_coeffs.iter().copied().rev().collect::<Vec<F>>();
             let poly_g_rev_coeffs: Vec<F> = poly_g_coeffs.iter().copied().rev().collect::<Vec<F>>();

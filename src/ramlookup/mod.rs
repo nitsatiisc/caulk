@@ -4,12 +4,12 @@ mod cq;
 mod rampoly;
 
 use std::marker::PhantomData;
-use std::ops::{Mul, Neg, Sub};
+use std::ops::{AddAssign, Div, Mul, MulAssign, Neg, Sub};
 use ark_ec::{AffineCurve, PairingEngine, ProjectiveCurve};
-use ark_ff::{FftField, Field, One, PrimeField, Zero};
+use ark_ff::{BigInteger, FftField, Field, One, PrimeField, Zero};
 use ark_poly::{univariate::DensePolynomial, EvaluationDomain, GeneralEvaluationDomain};
 use ark_poly_commit::{kzg10, Polynomial, UVPolynomial};
-use ark_poly_commit::kzg10::VerifierKey;
+use ark_poly_commit::kzg10::{Proof, VerifierKey};
 use ark_std::{log2, test_rng, time::Instant, UniformRand};
 use merlin::Transcript;
 use crate::{multi::{
@@ -17,7 +17,7 @@ use crate::{multi::{
     LookupProverInput,
 }, KZGCommit, PublicParameters, CaulkTranscript, compute_vanishing_poly};
 use rand::{Rng, RngCore};
-use crate::ramlookup::cq::CqProof;
+use crate::ramlookup::cq::{compute_cq_proof, CqExample, CqLookupInstance, CqProof, CqProverInput, CqPublicParams};
 
 
 pub struct CommittedRAM<E: PairingEngine> {
@@ -199,13 +199,192 @@ pub struct MonotonicTranscriptInstance<E: PairingEngine> {
     pub h_domain_size: usize,
 }
 
+pub struct MonotonicTranscriptExample<E: PairingEngine> {
+    pub a_vec: Vec<usize>,
+    pub v_vec: Vec<usize>,
+    pub a_dash_vec: Vec<usize>,
+    pub v_dash_vec: Vec<usize>,
+    pub op_vec: Vec<usize>,
+    pub a_bar_vec: Vec<usize>,
+    pub v_bar_vec: Vec<usize>,
+    pub A_ast_vec: Vec<usize>,
+    pub V_ast_vec: Vec<usize>,
+    pub T_ast_vec: Vec<usize>,
+    pub Op_ast_vec: Vec<usize>,
+    pub tr: RAMTranscript<E>,
+    pub addr_tr: RAMTranscript<E>,
+    pub tr_com: RAMTranscriptCom<E>,
+    pub addr_tr_com: RAMTranscriptCom<E>,
+    pub m_domain_size: usize,
+    pub h_domain_size: usize,
+}
+
+impl <E: PairingEngine> MonotonicTranscriptExample<E> {
+    pub fn new(m_domain_size: usize, h_domain_size:usize, pp: &PublicParameters<E>) -> Self {
+        let m = 1usize << m_domain_size;
+        let k = 4*m;
+        let N = 1usize << h_domain_size;
+
+        let m_domain = GeneralEvaluationDomain::<E::Fr>::new(m).unwrap();
+        let k_domain = GeneralEvaluationDomain::<E::Fr>::new(k).unwrap();
+
+        let mut table: Vec<usize> = Vec::new();
+        let mut rng = ark_std::test_rng();
+        let range_max: usize = 10000;
+
+        for _ in 0..N {
+            table.push(usize::rand(&mut rng) % range_max);
+        }
+
+        let mut a_vec: Vec<usize> = Vec::new();
+        let mut v_vec: Vec<usize> = Vec::new();
+        let mut op_vec: Vec<usize> = Vec::new();
+        let mut v_bar_vec: Vec<usize> = Vec::new();
+
+        // initial sub-ram
+        for _ in 0..m {
+            let k = usize::rand(&mut rng) % N;
+            a_vec.push(k);
+            v_vec.push(table[k]);
+        }
+
+        // operations
+        for i in 0..m {
+            let op = usize::rand(&mut rng) % 2;
+            op_vec.push(op);
+
+            let v = if op == 0 {
+                table[a_vec[i]]
+            } else {
+                usize::rand(&mut rng) % range_max
+            };
+
+            v_bar_vec.push(v);
+            table[a_vec[i]] = v;
+        }
+
+        // final ram
+        let mut v_dash_vec: Vec<usize> = Vec::new();
+        for i in 0..m {
+            v_dash_vec.push(table[a_vec[i]]);
+        }
+
+        // concatenated vectors
+        let zero_vec = vec![0usize;m];
+        let A_vec = vec![a_vec.clone(), a_vec.clone(), a_vec.clone(), a_vec.clone()].concat();
+        let V_vec = vec![v_vec.clone(), v_vec.clone(), v_bar_vec.clone(), v_dash_vec.clone()].concat();
+        let Op_vec = vec![zero_vec.clone(), zero_vec.clone(), op_vec.clone(), zero_vec.clone()].concat();
+        let T_vec: Vec<usize> = (0..k).collect();
+
+        let mut sort_vec: Vec<u64> = Vec::new();
+        for i in 0..k {
+            let key = (m as u64)*(A_vec[i] as u64) + (T_vec[i] as u64);
+            sort_vec.push(key);
+        }
+
+        let perm = permutation::sort(&sort_vec);
+        let A_ast_vec = perm.apply_slice(&A_vec);
+        let T_ast_vec = perm.apply_slice(&T_vec);
+        let Op_ast_vec = perm.apply_slice(&Op_vec);
+        let V_ast_vec = perm.apply_slice(&V_vec);
+
+        // Convert vectors to field vectors to commit
+        //let a_vec_ff = a_vec.iter().map(|x| E::Fr::from(*x as u128)).collect::<Vec<_>>();
+        //let v_vec_ff = v_vec.iter().map(|x| E::Fr::from(*x as u128)).collect::<Vec<_>>();
+        //let op_vec_ff = op_vec.iter().map(|x| E::Fr::from(*x as u128)).collect::<Vec<_>>();
+        //let v_bar_ff = v_bar_vec.iter().map(|x| E::Fr::from(*x as u128)).collect::<Vec<_>>();
+
+        let A_vec_ff = A_vec.iter().map(|x| E::Fr::from(*x as u128)).collect::<Vec<_>>();
+        let V_vec_ff = V_vec.iter().map(|x| E::Fr::from(*x as u128)).collect::<Vec<_>>();
+        let Op_vec_ff = Op_vec.iter().map(|x| E::Fr::from(*x as u128)).collect::<Vec<_>>();
+        let T_vec_ff = T_vec.iter().map(|x| E::Fr::from(*x as u128)).collect::<Vec<_>>();
+
+        let A_ast_vec_ff = A_ast_vec.iter().map(|x| E::Fr::from(*x as u128)).collect::<Vec<_>>();
+        let V_ast_vec_ff = V_ast_vec.iter().map(|x| E::Fr::from(*x as u128)).collect::<Vec<_>>();
+        let Op_ast_vec_ff = Op_ast_vec.iter().map(|x| E::Fr::from(*x as u128)).collect::<Vec<_>>();
+        let T_ast_vec_ff = T_ast_vec.iter().map(|x| E::Fr::from(*x as u128)).collect::<Vec<_>>();
+
+        let ts_poly = DensePolynomial::from_coefficients_vec(k_domain.ifft(&T_vec_ff));
+        let a_poly = DensePolynomial::from_coefficients_vec(k_domain.ifft(&A_vec_ff));
+        let v_poly = DensePolynomial::from_coefficients_vec(k_domain.ifft(&V_vec_ff));
+        let op_poly = DensePolynomial::from_coefficients_vec(k_domain.ifft(&Op_vec_ff));
+
+        let ts_ast_poly = DensePolynomial::from_coefficients_vec(k_domain.ifft(&T_ast_vec_ff));
+        let a_ast_poly = DensePolynomial::from_coefficients_vec(k_domain.ifft(&A_ast_vec_ff));
+        let v_ast_poly = DensePolynomial::from_coefficients_vec(k_domain.ifft(&V_ast_vec_ff));
+        let op_ast_poly = DensePolynomial::from_coefficients_vec(k_domain.ifft(&Op_ast_vec_ff));
+
+        let ts_poly_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &ts_poly);
+        let a_poly_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &a_poly);
+        let v_poly_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &v_poly);
+        let op_poly_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &op_poly);
+
+        let ts_ast_poly_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &ts_ast_poly);
+        let a_ast_poly_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &a_ast_poly);
+        let v_ast_poly_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &v_ast_poly);
+        let op_ast_poly_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &op_ast_poly);
+
+        MonotonicTranscriptExample::<E> {
+            a_vec: a_vec.clone(),
+            v_vec: v_vec,
+            a_dash_vec: a_vec.clone(),
+            v_dash_vec: v_dash_vec,
+            op_vec: op_vec,
+            a_bar_vec: a_vec,
+            v_bar_vec: v_bar_vec,
+            A_ast_vec: A_ast_vec,
+            V_ast_vec: V_ast_vec,
+            T_ast_vec: T_ast_vec,
+            Op_ast_vec: Op_ast_vec,
+            tr: RAMTranscript {
+                ts_poly: ts_poly,
+                op_poly: op_poly,
+                a_poly: a_poly,
+                v_poly: v_poly,
+            },
+            addr_tr: RAMTranscript {
+                ts_poly: ts_ast_poly,
+                op_poly: op_ast_poly,
+                a_poly: a_ast_poly,
+                v_poly: v_ast_poly,
+            },
+            tr_com: RAMTranscriptCom {
+                ts_poly_com: ts_poly_com,
+                op_poly_com: op_poly_com,
+                a_poly_com: a_poly_com,
+                v_poly_com: v_poly_com,
+            },
+            addr_tr_com: RAMTranscriptCom {
+                ts_poly_com: ts_ast_poly_com,
+                op_poly_com: op_ast_poly_com,
+                a_poly_com: a_ast_poly_com,
+                v_poly_com: v_ast_poly_com,
+            },
+            m_domain_size,
+            h_domain_size,
+        }
+    }
+
+    pub fn display(&self) {
+        let k = 4 * (1usize << self.m_domain_size);
+        println!(" TS | OP | A | V");
+
+        for i in 0..k {
+            println!(" {} | {} | {} | {} ",
+                     self.T_ast_vec[i], self.Op_ast_vec[i], self.A_ast_vec[i], self.V_ast_vec[i]
+            );
+
+        }
+    }
+}
+
 pub struct ProofMonotonic<E: PairingEngine> {
-    pub z1_com: DensePolynomial<E::Fr>,
-    pub z2_com: DensePolynomial<E::Fr>,
-    pub delta_A_com: DensePolynomial<E::Fr>,
-    pub delta_T_com: DensePolynomial<E::Fr>,
-    pub q1_com: DensePolynomial<E::Fr>,
-    pub q2_com: DensePolynomial<E::Fr>,
+    pub z1_com: E::G1Affine,
+    pub z2_com: E::G1Affine,
+    pub delta_A_com: E::G1Affine,
+    pub delta_T_com: E::G1Affine,
+    pub q1_com: E::G1Affine,
+    pub q2_com: E::G1Affine,
 
     pub val_A_s: E::Fr,
     pub val_A_ws: E::Fr,
@@ -213,7 +392,7 @@ pub struct ProofMonotonic<E: PairingEngine> {
     pub val_deltaT_s: E::Fr,
     pub val_T_s: E::Fr,
     pub val_T_ws: E::Fr,
-    pub val_op_s: E::Fr,
+    pub val_op_ws: E::Fr,
     pub val_V_s: E::Fr,
     pub val_V_ws: E::Fr,
     pub val_Q1_s: E::Fr,
@@ -230,6 +409,471 @@ pub struct ProofMonotonic<E: PairingEngine> {
     pub range_proof_t: CqProof<E>
 }
 
+pub struct ProofMonotonicProverInput<E: PairingEngine> {
+    pub set_I1: Vec<usize>,
+    pub set_I2: Vec<usize>,
+    pub z1_poly: DensePolynomial<E::Fr>,
+    pub z2_poly: DensePolynomial<E::Fr>,
+    pub delta_A_vec: Vec<usize>,
+    pub delta_T_vec: Vec<usize>,
+    pub delta_A_poly: DensePolynomial<E::Fr>,
+    pub delta_T_poly: DensePolynomial<E::Fr>,
+}
+
+// The function generates the inputs needed for proof from
+// the example for a monotonic transcript
+pub fn generate_monotonic_prover_input<E: PairingEngine>(
+    example: &MonotonicTranscriptExample<E>,
+    pp: &PublicParameters<E>
+) -> ProofMonotonicProverInput<E>
+{
+    let m_domain_size = example.m_domain_size;
+    let h_domain_size = example.h_domain_size;
+    let k_domain_size = m_domain_size + 2;
+
+    let m = 1usize << m_domain_size;
+    let k = 1usize << k_domain_size;
+    let N = 1usize << h_domain_size;
+
+    let mut vec_I1: Vec<usize> = Vec::new();
+    let mut vec_I2: Vec<usize> = Vec::new();
+    let mut delta_A_vec: Vec<usize> = Vec::new();
+    let mut delta_T_vec: Vec<usize> = Vec::new();
+
+    // compute sets I1 and I2
+    for i in 0..k-1 {
+        if example.A_ast_vec[i] != example.A_ast_vec[i+1] {
+            vec_I1.push(i);
+            assert_eq!(example.A_ast_vec[i+1] > example.A_ast_vec[i], true, "Wrong transcript (address)");
+            delta_A_vec.push(example.A_ast_vec[i+1] - example.A_ast_vec[i]);
+            delta_T_vec.push(0);
+        } else {
+            vec_I2.push(i);
+            assert_eq!(example.T_ast_vec[i+1] > example.T_ast_vec[i], true, "Wrong transcript (time)");
+            delta_A_vec.push(0);
+            delta_T_vec.push(example.T_ast_vec[i+1] - example.T_ast_vec[i]);
+        }
+    }
+
+    // set the final entry of these vectors to 0. It is not used in the checks.
+    delta_A_vec.push(0);
+    delta_T_vec.push(0);
+    assert_eq!(delta_A_vec.len(), k, "Wrong length: delta_A_vec");
+    assert_eq!(delta_T_vec.len(), k, "Wrong length: delta_T_vec");
+
+    let i1_len = vec_I1.len();
+    let i2_len = vec_I2.len();
+
+    let k_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(k).unwrap();
+
+    // compute field vectors from integer vectors
+    let mut vec_I1_ff = vec_I1.iter().map(|x| k_domain.element(*x)).collect::<Vec<_>>();
+    let mut vec_I2_ff = vec_I2.iter().map(|x| k_domain.element(*x)).collect::<Vec<_>>();
+    let delta_A_vec_ff = delta_A_vec.iter().map(|x| E::Fr::from(*x as u128)).collect::<Vec<_>>();
+    let delta_T_vec_ff = delta_T_vec.iter().map(|x| E::Fr::from(*x as u128)).collect::<Vec<_>>();
+
+    // resize to power of 2 for vanishing polynomial computation.
+    vec_I1_ff.resize(k, E::Fr::zero());
+    vec_I2_ff.resize(k, E::Fr::zero());
+
+    let extra_I1 = k - i1_len;
+    let extra_I2 = k - i2_len;
+
+    // compute vanishing polynomials
+    let mut z1_poly = compute_vanishing_poly(&vec_I1_ff, 1);
+    let mut z2_poly = compute_vanishing_poly(&vec_I2_ff, 1);
+    let delta_A_poly = DensePolynomial::from_coefficients_vec(k_domain.ifft(&delta_A_vec_ff));
+    let delta_T_poly = DensePolynomial::from_coefficients_vec(k_domain.ifft(&delta_T_vec_ff));
+
+    assert_eq!(z1_poly.degree(), k, "Incorrect degree z1_poly");
+    assert_eq!(z2_poly.degree(), k, "Incorrect degree z2_poly");
+
+    let mut coeffs_z1: Vec<E::Fr> = Vec::new();
+    let mut coeffs_z2: Vec<E::Fr> = Vec::new();
+
+    for i in 0..=i1_len {
+        coeffs_z1.push(z1_poly.coeffs[i+extra_I1]);
+    }
+
+    for i in 0..=i2_len {
+        coeffs_z2.push(z2_poly.coeffs[i+extra_I2]);
+    }
+
+    z1_poly = DensePolynomial::from_coefficients_vec(coeffs_z1);
+    z2_poly = DensePolynomial::from_coefficients_vec(coeffs_z2);
+
+    ProofMonotonicProverInput::<E> {
+        set_I1: vec_I1,
+        set_I2: vec_I2,
+        z1_poly: z1_poly,
+        z2_poly: z2_poly,
+        delta_A_vec: delta_A_vec,
+        delta_T_vec: delta_T_vec,
+        delta_A_poly: delta_A_poly,
+        delta_T_poly: delta_T_poly,
+    }
+}
+
+// Given a polynomial A, and k
+// outputs polynomial A(\omega X) - A(X)
+// where omega is k^th root of unity
+pub fn compute_shifted_difference<E: PairingEngine>(
+    a_poly: &DensePolynomial<E::Fr>,
+    k_domain_size: usize,
+) -> DensePolynomial<E::Fr> {
+    let k = 1usize << k_domain_size;
+    let k_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(k).unwrap();
+    let d = a_poly.degree();
+
+    let mut coeffs_Aw: Vec<E::Fr> = Vec::new();
+    for i in 0..=d {
+        coeffs_Aw.push(a_poly.coeffs[i].mul(k_domain.element(i).sub(E::Fr::one())));
+    }
+
+    DensePolynomial::from_coefficients_vec(coeffs_Aw)
+}
+
+pub fn compute_scaled_polynomial<E: PairingEngine>(
+    a_poly: &DensePolynomial<E::Fr>,
+    gamma: E::Fr,
+) -> DensePolynomial<E::Fr>
+{
+    let mut scaled_coeffs: Vec<E::Fr> = Vec::new();
+    for i in 0..a_poly.coeffs.len() {
+        scaled_coeffs.push(a_poly.coeffs[i].mul(gamma));
+    }
+
+    DensePolynomial::from_coefficients_vec(scaled_coeffs)
+}
+
+pub fn compute_q1_and_q2_poly<E: PairingEngine>(
+    a_poly: &DensePolynomial<E::Fr>,
+    t_poly: &DensePolynomial<E::Fr>,
+    v_poly: &DensePolynomial<E::Fr>,
+    op_poly: &DensePolynomial<E::Fr>,
+    delta_A_poly: &DensePolynomial<E::Fr>,
+    delta_T_poly: &DensePolynomial<E::Fr>,
+    z1_poly: &DensePolynomial<E::Fr>,
+    z2_poly: &DensePolynomial<E::Fr>,
+    gamma: E::Fr,
+    k_domain_size: usize,
+) -> (DensePolynomial<E::Fr>, DensePolynomial<E::Fr>)
+{
+    let dA_poly:DensePolynomial<E::Fr> = compute_shifted_difference::<E>(&a_poly, k_domain_size);
+    let dT_poly: DensePolynomial<E::Fr> = compute_shifted_difference::<E>(&t_poly, k_domain_size);
+    let dV_poly: DensePolynomial<E::Fr> = compute_shifted_difference::<E>(&v_poly, k_domain_size);
+    let dOp_poly: DensePolynomial<E::Fr> = compute_shifted_difference::<E>(&op_poly, k_domain_size);
+
+    let gamma_sq = gamma.square();
+    let dA_dash_poly:DensePolynomial<E::Fr> = dA_poly.sub(delta_A_poly);
+    let q1_poly = dA_dash_poly.div(z1_poly);
+
+    assert_eq!(dA_dash_poly, z1_poly.mul(&q1_poly), "Division failed");
+
+    let dT_dash_poly: DensePolynomial<E::Fr> = dT_poly.sub(delta_T_poly);
+    let poly_one: DensePolynomial<E::Fr> = DensePolynomial::from_coefficients_vec(vec![E::Fr::one()]);
+    let op_dash_poly:DensePolynomial<E::Fr> = &dOp_poly.sub(&poly_one) + op_poly;
+    let num_poly: DensePolynomial<E::Fr> = compute_scaled_polynomial::<E>(&dT_dash_poly, gamma);
+    let op_dV_poly: DensePolynomial<E::Fr> = &op_dash_poly * &dV_poly;
+    let op_dV_poly = compute_scaled_polynomial::<E>(&op_dV_poly, gamma_sq);
+    let mut numerator_q2 = dA_poly.clone();
+    numerator_q2 = &numerator_q2 + &num_poly;
+    numerator_q2 = &numerator_q2 + &op_dV_poly;
+    let q2_poly = numerator_q2.div(z2_poly);
+
+    (q1_poly, q2_poly)
+}
+
+fn compute_aggregate_poly<E: PairingEngine>(
+    poly_vec: &[DensePolynomial<E::Fr>],
+    r: <E as PairingEngine>::Fr
+) -> DensePolynomial<E::Fr> {
+    let mut ch = E::Fr::one();
+    let mut agg_poly = DensePolynomial::<E::Fr>::zero();
+    for i in 0..poly_vec.len() {
+        let scaled_poly = compute_scaled_polynomial::<E>(&poly_vec[i], ch);
+        agg_poly.add_assign(&scaled_poly);
+        ch.mul_assign(r);
+    }
+    agg_poly
+}
+
+// Compute proof for monotonic transcript instance
+pub fn compute_monotonic_proof<E: PairingEngine>(
+    instance: &MonotonicTranscriptInstance<E>,
+    example: &MonotonicTranscriptExample<E>,
+    input: &ProofMonotonicProverInput<E>,
+    pp: &PublicParameters<E>
+) -> ProofMonotonic<E> {
+
+    let m_domain_size = instance.m_domain_size;
+    let h_domain_size = instance.h_domain_size;
+    let k_domain_size = instance.m_domain_size + 2;
+
+    let m = 1usize << m_domain_size;
+    let k = 1usize << k_domain_size;
+
+    let m_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(m).unwrap();
+    let k_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(k).unwrap();
+
+    let mut transcript = CaulkTranscript::<E::Fr>::new();
+
+    // add the instance to the transcript
+    transcript.append_element(b"T_com", &instance.tr_com.ts_poly_com);
+    transcript.append_element(b"A_com", &instance.tr_com.a_poly_com);
+    transcript.append_element(b"Op_com", &instance.tr_com.op_poly_com);
+    transcript.append_element(b"V_com", &instance.tr_com.v_poly_com);
+
+    // add prover's first message
+    let z1_com: E::G1Affine = KZGCommit::commit_g1(&pp.poly_ck, &input.z1_poly);
+    let z2_com: E::G1Affine = KZGCommit::commit_g1(&pp.poly_ck, &input.z2_poly);
+    let delta_A_com: E::G1Affine = KZGCommit::commit_g1(&pp.poly_ck, &input.delta_A_poly);
+    let delta_T_com: E::G1Affine = KZGCommit::commit_g1(&pp.poly_ck, &input.delta_T_poly);
+
+    transcript.append_element(b"z1_com", &z1_com);
+    transcript.append_element(b"z2_com", &z2_com);
+    transcript.append_element(b"delta_A_com", &delta_A_com);
+    transcript.append_element(b"delta_T_com", &delta_T_com);
+
+    // generate verifier challenge
+    let gamma = transcript.get_and_append_challenge(b"gamma");
+    let gamma_sq = gamma.square();
+
+    // send prover's second message
+    let (q1_poly, q2_poly) = compute_q1_and_q2_poly::<E>(
+        &example.addr_tr.a_poly,
+        &example.addr_tr.ts_poly,
+        &example.addr_tr.v_poly,
+        &example.addr_tr.op_poly,
+        &input.delta_A_poly,
+        &input.delta_T_poly,
+        &input.z1_poly,
+        &input.z2_poly,
+        gamma.clone(),
+        k_domain_size
+    );
+
+    let q1_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &q1_poly);
+    let q2_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &q2_poly);
+
+    transcript.append_element(b"q1_com", &q1_com);
+    transcript.append_element(b"q2_com", &q2_com);
+
+    // verifier sends evaluation point
+    let s = transcript.get_and_append_challenge(b"s_eval");
+    let ws: E::Fr = s.mul(k_domain.element(1));
+    // prover sends evaluations
+    let v_A_s = example.addr_tr.a_poly.evaluate(&s);
+    let v_A_ws = example.addr_tr.a_poly.evaluate(&ws);
+    let v_delta_A_s = input.delta_A_poly.evaluate(&s);
+    let v_T_s = example.addr_tr.ts_poly.evaluate(&s);
+    let v_T_ws = example.addr_tr.ts_poly.evaluate(&ws);
+    let v_delta_T_s = input.delta_T_poly.evaluate(&s);
+    let v_op_ws = example.addr_tr.op_poly.evaluate(&ws);
+    let v_V_s = example.addr_tr.v_poly.evaluate(&s);
+    let v_V_ws = example.addr_tr.v_poly.evaluate(&ws);
+    let v_Q1_s = q1_poly.evaluate(&s);
+    let v_Q2_s = q2_poly.evaluate(&s);
+    let v_Z1_s = input.z1_poly.evaluate(&s);
+    let v_Z2_s = input.z2_poly.evaluate(&s);
+
+    // add the evaluations to the transcript
+    transcript.append_element(b"v_A_s", &v_A_s);
+    transcript.append_element(b"v_A_ws", &v_A_ws);
+    transcript.append_element(b"v_delta_A_s", &v_delta_A_s);
+    transcript.append_element(b"v_T_s", &v_T_s);
+    transcript.append_element(b"v_T_ws", &v_T_ws);
+    transcript.append_element(b"v_delta_T_s", &v_delta_T_s);
+    transcript.append_element(b"v_op_ws", &v_op_ws);
+    transcript.append_element(b"v_V_s", &v_V_s);
+    transcript.append_element(b"v_V_ws", &v_V_ws);
+    transcript.append_element(b"v_Q1_s", &v_Q1_s);
+    transcript.append_element(b"v_Q2_s", &v_Q2_s);
+    transcript.append_element(b"v_Z1_s", &v_Z1_s);
+    transcript.append_element(b"v_Z2_s", &v_Z2_s);
+
+
+    // sanity checks
+    assert_eq!(v_Q1_s * v_Z1_s, v_A_ws.sub(v_A_s) - v_delta_A_s, "Q1(s).Z1(s) != v_A(ws)-v_A(s)-delta_A(s)");
+    assert_eq!(v_Z1_s * v_Z2_s * (s-k_domain.element(k-1)), k_domain.evaluate_vanishing_polynomial(s), "Z1(s).Z2(s).(s-1)=s^k-1");
+    assert_eq!(v_Q2_s * v_Z2_s, (v_A_ws - v_A_s) + (gamma * (v_T_ws - v_T_s - v_delta_T_s)) +
+        (gamma_sq * (v_op_ws - E::Fr::one()) * (v_V_ws - v_V_s)), "Q2(s).Z2(s)=A(ws)-A(s)+gamma(T(ws)-T(s)-delta_T(s)+...");
+
+    // verifier sends evaluation aggregation challenge
+    let r1 = transcript.get_and_append_challenge(b"r1");
+    let r2 = transcript.get_and_append_challenge(b"r2");
+
+    let polys_s = vec![
+        example.addr_tr.a_poly.clone(),
+        input.delta_A_poly.clone(),
+        example.addr_tr.ts_poly.clone(),
+        input.delta_T_poly.clone(),
+        example.addr_tr.v_poly.clone(),
+        q1_poly.clone(),
+        q2_poly.clone(),
+        input.z1_poly.clone(),
+        input.z2_poly.clone()
+    ];
+
+    let polys_ws = vec![
+        example.addr_tr.a_poly.clone(),
+        example.addr_tr.ts_poly.clone(),
+        example.addr_tr.v_poly.clone(),
+        example.addr_tr.op_poly.clone()
+    ];
+
+    let agg_poly_s = compute_aggregate_poly::<E>(&polys_s, r1);
+    let agg_poly_ws = compute_aggregate_poly::<E>(&polys_ws, r2);
+
+    let (val_s, proof_s) = KZGCommit::<E>::open_g1_batch(
+        &pp.poly_ck,
+        &agg_poly_s,
+        None,
+        &[s],
+    );
+
+    let (val_ws, proof_ws) = KZGCommit::<E>::open_g1_batch(
+        &pp.poly_ck,
+        &agg_poly_ws,
+        None,
+        &[ws]
+    );
+
+    let N = 1usize << h_domain_size;
+    let table = (0..N).into_iter().collect::<Vec<_>>();
+    let table_pp: CqProverInput<E> = CqProverInput::load(h_domain_size);
+    let cq_pp: CqPublicParams<E> = CqPublicParams::load(h_domain_size);
+
+    let example_A: CqExample<E::Fr> = CqExample::new_fixed_subvec(
+        &table,
+        &example.A_ast_vec,
+        k_domain_size,
+        k_domain_size);
+
+    let example_T: CqExample<E::Fr> = CqExample::new_fixed_subvec(
+        &table,
+        &example.T_ast_vec,
+        k_domain_size,
+        k_domain_size);
+
+    let example_delta_A: CqExample<E::Fr> = CqExample::new_fixed_subvec(
+        &table,
+        &input.delta_A_vec,
+        k_domain_size,
+        k_domain_size);
+
+    let example_delta_T: CqExample<E::Fr> = CqExample::new_fixed_subvec(
+        &table,
+        &input.delta_T_vec,
+        k_domain_size,
+        k_domain_size);
+
+
+
+    let t_com = KZGCommit::<E>::commit_g2(&pp.g2_powers, &example_A.t_poly);
+    //let f_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &example_A.f_poly);
+    // compute CQ proofs
+    let range_check_A:CqLookupInstance<E> = CqLookupInstance::<E> {
+        t_com: t_com,
+        f_com: instance.tr_com.a_poly_com,
+        m_domain_size,
+        h_domain_size,
+    };
+
+    let range_check_T:CqLookupInstance<E> = CqLookupInstance::<E> {
+        t_com: t_com,
+        f_com: instance.tr_com.ts_poly_com,
+        m_domain_size,
+        h_domain_size,
+    };
+
+    let range_check_delta_A:CqLookupInstance<E> = CqLookupInstance::<E> {
+        t_com: t_com,
+        f_com: delta_A_com,
+        m_domain_size,
+        h_domain_size,
+    };
+
+    let range_check_delta_T:CqLookupInstance<E> = CqLookupInstance::<E> {
+        t_com: t_com,
+        f_com: delta_T_com,
+        m_domain_size,
+        h_domain_size,
+    };
+
+
+    let proof_range_A: CqProof<E> = compute_cq_proof(
+        &range_check_A,
+        &table_pp,
+        &example_A,
+        &cq_pp,
+        &pp,
+        false,
+    );
+
+    let proof_range_T: CqProof<E> = compute_cq_proof(
+        &range_check_T,
+        &table_pp,
+        &example_T,
+        &cq_pp,
+        &pp,
+        false,
+    );
+
+    let proof_range_delta_A: CqProof<E> = compute_cq_proof(
+        &range_check_delta_A,
+        &table_pp,
+        &example_delta_A,
+        &cq_pp,
+        &pp,
+        false,
+    );
+
+    let proof_range_delta_T: CqProof<E> = compute_cq_proof(
+        &range_check_delta_T,
+        &table_pp,
+        &example_delta_T,
+        &cq_pp,
+        &pp,
+        false,
+    );
+
+
+    // prover sends aggregated KZG proofs
+
+
+    //todo!()
+
+    ProofMonotonic::<E> {
+        z1_com: z1_com,
+        z2_com: z2_com,
+        delta_A_com: delta_A_com,
+        delta_T_com: delta_T_com,
+        q1_com: q1_com,
+        q2_com: q2_com,
+        val_A_s: v_A_s,
+        val_A_ws: v_A_ws,
+        val_deltaA_s: v_delta_A_s,
+        val_deltaT_s: v_delta_T_s,
+        val_T_s: v_T_s,
+        val_T_ws: v_T_ws,
+        val_op_ws: v_op_ws,
+        val_V_s: v_V_s,
+        val_V_ws: v_V_ws,
+        val_Q1_s: v_Q1_s,
+        val_Q2_s: v_Q2_s,
+        val_Z1_s: v_Z1_s,
+        val_Z2_s: v_Z2_s,
+        pi_s: proof_s,
+        pi_ws: proof_ws,
+        range_proof_A: proof_range_A,
+        range_proof_deltaA: proof_range_delta_A,
+        range_proof_deltaT: proof_range_delta_T,
+        range_proof_t: proof_range_T,
+    }
+
+
+}
 
 
 
@@ -440,7 +1084,42 @@ mod tests {
     use ark_bls12_381::Fr;
     use ark_poly::GeneralEvaluationDomain;
 
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_transcript() {
+        test_transcript_helper::<Bls12_381>();
+    }
 
+    fn test_transcript_helper<E: PairingEngine>() {
+        let m_domain_size: usize = 7;
+        let k_domain_size: usize = 9;
+        let h_domain_size: usize = 16   ;
+        let N: usize = 1 << h_domain_size;
+        let m = 1usize << m_domain_size;
+        let n = h_domain_size;
+        let max_degree = N;
+
+        let pp: PublicParameters<E> = PublicParameters::setup(&max_degree, &N, &m, &n);
+        let example: MonotonicTranscriptExample<E> = MonotonicTranscriptExample::new(m_domain_size, h_domain_size, &pp);
+        example.display();
+
+        let input = generate_monotonic_prover_input::<E>(&example, &pp);
+        let instance: MonotonicTranscriptInstance<E> = MonotonicTranscriptInstance {
+            tr_com: example.tr_com.clone(),
+            m_domain_size,
+            h_domain_size,
+        };
+
+        let mut start = Instant::now();
+        let proof = compute_monotonic_proof::<E>(
+            &instance,
+            &example,
+            &input,
+            &pp
+        );
+        println!("Computing monotonicity proof took {} secs", start.elapsed().as_secs());
+
+    }
     #[test]
     #[allow(non_snake_case)]
     fn test_concat() {
@@ -476,7 +1155,7 @@ mod tests {
 
         // Compute KZG commitments
 
-        let pp: PublicParameters<Bls12_381> = PublicParameters::setup(&N, &k, &m, &N_domain_size);
+        let pp: PublicParameters<Bls12_381> = PublicParameters::setup(&N, &N, &m, &N_domain_size);
 
         let (a_com, a_bar_com, a_dash_com,
             v_com, v_bar_com, v_dash_com,

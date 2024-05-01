@@ -30,6 +30,7 @@ merlin = { version = "3.0.0" }
 ark-bn254 = "0.4.0"
 concat-arrays = "0.1.2"
 elements-frequency = "0.5.1"
+permutation = "0.4.1"
 
 [features]
 asm = [ "ark-ff/asm" ]
