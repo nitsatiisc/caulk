@@ -192,6 +192,8 @@ pub fn fast_div_poly_cache<F>(
 
 
     let l = poly_f.degree() - poly_g.degree() + 1;
+    //@todo Disable the cache for now, as cache handling is incorrect. We only need reciprocal of X^l/g in cache. Fix later
+    cache.invert_poly_map.clear();
     match cache.invert_poly_map.contains_key(&(poly_g_index, l)) {
         true => { quotient = cache.invert_poly_map.get(&(poly_g_index, l)).unwrap().clone(); cache.cache_hits += 1; }
         false => {

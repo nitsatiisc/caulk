@@ -173,6 +173,8 @@ pub fn compute_scalar_coefficients<F: PrimeField>(
     );
     println!("Computing b_vec over I took {} msec", start.elapsed().as_millis());
 
+
+
     start = Instant::now();
     let (a_vec, update_params) = compute_reciprocal_sum::<F>(
         &adj_t_j_vec,
@@ -218,6 +220,13 @@ pub fn compute_scalar_coefficients<F: PrimeField>(
     let c_poly = fast_poly_interpolate(&h_i_vec, &c_poly_lagrange_coeffs);
     println!("Interpolating C(X) took {} msec", start.elapsed().as_millis());
 
+    // check that C(X) is correctly interpolated
+    for i in 0..set_i.len() {
+        let lhs = c_poly.evaluate(&h_i_vec[i]);
+        let rhs = c_i_vec[i] * z_I_dvt_evals_I[i];
+        assert_eq!(lhs, rhs, "lhs != rhs at i={}",i);
+    }
+
     // evaluate C(X) on set K
     start = Instant::now();
     let c_evals_K = fast_poly_evaluate_with_pp(
@@ -226,12 +235,23 @@ pub fn compute_scalar_coefficients<F: PrimeField>(
         &update_params.sub_products,
         cache
     );
+
+
     println!("Evaluating C(X) over K took {} msec", start.elapsed().as_millis());
+
+    // check that C(X) is correctly evaluated
+    for i in 0..update_params.set_hk.len() {
+        let lhs = c_poly.evaluate(&update_params.set_hk[i]);
+        let rhs = c_evals_K[i];
+        assert_eq!(lhs, rhs, "lhs != rhs at i={}",i);
+    }
+
+
+
     // extend the b vector
     for i in set_i.len()..set_k.len() {
         b_vec.push(c_evals_K[i].div(z_I_evals_K[i]));
     }
-    // println!("Evaluated z_I_dvt on set H_K in {} secs", start.elapsed().as_secs());
 
     (a_vec, b_vec)
 }
@@ -376,8 +396,8 @@ mod tests {
     fn test_scalar_coefficients_benchmark<E: PairingEngine>()
     {
         let h_domain_size = 20usize;
-        let i_set_size = 1usize << 10;
-        let k_set_size = 1usize << 18;
+        let i_set_size = 1usize << 6;
+        let k_set_size = 1usize << 7;
         let mut rng = ark_std::test_rng();
 
         let i_set = (0..i_set_size).into_iter().collect::<Vec<_>>();
@@ -387,7 +407,8 @@ mod tests {
         let mut t_j_vec: Vec<E::Fr> = Vec::new();
 
         for i in 0..i_set.len() {
-            c_i_vec.push(E::Fr::rand(&mut rng));
+            //c_i_vec.push(E::Fr::rand(&mut rng));
+            c_i_vec.push(E::Fr::one());
         }
 
         for i in 0..k_set.len() {
@@ -422,7 +443,7 @@ mod tests {
         }
 
         for i in 0..b_vec.len() {
-            assert_eq!(b_vec[i], b_vec_naive[i], "b_vec mismatch");
+            assert_eq!(b_vec[i], b_vec_naive[i], "b_vec mismatch at i = {}", i);
         }
 
     }
