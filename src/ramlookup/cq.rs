@@ -53,9 +53,9 @@ pub struct CqPublicParams<E: PairingEngine> {
  * openings_t_poly: encoded quotients ((T(X)-T(\omega^i))/(X-\omega^i)).g1
  */
 pub struct CqProverInput<E: PairingEngine> {
-    pub t_com: E::G2Affine,                          // commitment to table
-    pub t_poly: DensePolynomial<E::Fr>,             // polynomial interpolating the table on h_domain
-    pub openings_t_poly: Vec<E::G1Affine>,          // opening proofs of the t-polynomial
+    pub t_com: E::G2Affine,                             // commitment to table
+    pub t_poly: DensePolynomial<E::Fr>,                 // polynomial interpolating the table on h_domain
+    pub openings_t_poly: Vec<E::G1Affine>,              // opening proofs of the t-polynomial
 }
 
 impl<E: PairingEngine> CqProverInput<E> {
@@ -362,9 +362,9 @@ impl<F: PrimeField> CqExample<F> {
         h_domain_size: usize,
         m_domain_size: usize,
     ) -> CqExample<F> {
-        assert_eq!(base_table.size(), 1usize << h_domain_size, "base_table size mismatch");
-        assert_eq!(current_table.size(), 1usize << h_domain_size, "current_table size mismatch");
-        assert_eq!(f_vec.size(), 1usize << m_domain_size, "sub-vector size mismatch");
+        assert_eq!(base_table.len(), 1usize << h_domain_size, "base_table size mismatch");
+        assert_eq!(current_table.len(), 1usize << h_domain_size, "current_table size mismatch");
+        assert_eq!(f_vec.len(), 1usize << m_domain_size, "sub-vector size mismatch");
 
         let mut rng = ark_std::test_rng();
         let m:usize  = 1usize << m_domain_size;
@@ -409,27 +409,50 @@ impl<F: PrimeField> CqExample<F> {
 
         // add positions to k_set where the current table differs from base table
         for i in 0..current_table.len() {
+            if base_table[i] != current_table[i] && !k_set.contains(&i) {
+                k_set.insert(i);
+                k_set_vec.push(i);
+            }
+        }
 
+        let k_set_size: usize = usize::next_power_of_two(k_set_vec.len());
+        let k_domain_size: usize = usize::ilog2(k_set_size) as usize;
+        assert_eq!(k_set_size, 1usize << k_domain_size, "k_set_size != 1 << k_domain_size");
+
+        // append the k_set and k_vec to make size a power of two
+        while k_set_vec.len() < k_set_size {
+            let pos: usize = usize::rand(&mut rng) % current_table.len();
+            if !k_set.contains(&pos) {
+                k_set.insert(pos);
+                k_set_vec.push(pos);
+            }
+        }
+
+        let mut t_j_vec: Vec<F> = Vec::new();
+        for i in 0..k_set_vec.len() {
+            t_j_vec.push(F::from((current_table[k_set_vec[i]] - base_table[k_set_vec[i]]) as u128));
         }
 
 
+        let f_vec_ff = f_vec.iter().map(|x| F::from(*x as u128)).collect::<Vec<_>>();
+        let t_vec_ff = current_table.iter().map(|x| F::from(*x as u128)).collect::<Vec<_>>();
 
-
-
-
-
+        let m_domain: GeneralEvaluationDomain<F> = GeneralEvaluationDomain::new(1 << m_domain_size).unwrap();
+        let h_domain: GeneralEvaluationDomain<F> = GeneralEvaluationDomain::new(current_table.len()).unwrap();
+        let f_poly = DensePolynomial::from_coefficients_vec(m_domain.ifft(&f_vec_ff));
+        let t_poly = DensePolynomial::from_coefficients_vec(h_domain.ifft(&t_vec_ff));
 
 
 
         CqExample::<F> {
-            table: vec![],
-            f_vec: vec![],
-            f_poly: DensePolynomial { coeffs: vec![] },
+            table: current_table.to_vec(),
+            f_vec: f_vec.to_vec(),
+            f_poly: f_poly,
             m_vec: m_vec,
-            i_set: vec![],
-            k_set: vec![],
-            t_j_vec: vec![],
-            t_poly: DensePolynomial { coeffs: vec![] },
+            i_set: i_set_vec,
+            k_set: k_set_vec,
+            t_j_vec: t_j_vec,
+            t_poly: t_poly,
         }
 
     }
@@ -445,7 +468,7 @@ impl<F: PrimeField> CqExample<F> {
  * input - table specific inputs for the CQ prover.
  * example - sub-vector lookup example, with multiplicities etc.
  * cq_pp - openings of polynomials helpful for CQ proof generation.
- * pp - General public params (KZG srs etc).
+ * pp - Generic public parameters (KZG srs, etc.).
  * update - boolean flag indicating if approximate setup (1) or exact setup (0) is being used to compute the proof
  */
 #[allow(non_snake_case)]
@@ -1198,10 +1221,13 @@ impl<E: PairingEngine> CqPublicParams<E> {
 // inputs:
 // @t_vec: the table vector
 // @pp: public parameters containing srs of sufficient size for the table
+// @h_domain_size: Size of the table in power of two
+// @use_fake: If true, generates table parameters faster using SRS trapdoor to avoid group FFTs. Use this only for benchmarking and testing.
 pub fn generate_cq_table_input<E: PairingEngine>(
     t_vec: &Vec<usize>,
     pp: &PublicParameters<E>,
     h_domain_size: usize,
+    use_fake: bool,
 ) -> CqProverInput<E> {
     let N: usize = t_vec.len();
     assert_eq!(N, 1usize << h_domain_size);
@@ -1224,19 +1250,20 @@ pub fn generate_cq_table_input<E: PairingEngine>(
         power.mul_assign(beta);
     }
 
-    /*
-    let openings_t_poly = KZGCommit::<E>::multiple_open_fake::<E::G1Affine>(
-        &t_poly,
-        powers.as_slice(),
-        pp.poly_ck.powers_of_g[0],
-        h_domain_size
-    );
-    */
-    let openings_t_poly = KZGCommit::<E>::multiple_open::<E::G1Affine>(
-        &t_poly,
-        &pp.poly_ck.powers_of_g,
-        h_domain_size
-    );
+    let openings_t_poly = if !use_fake {
+        KZGCommit::<E>::multiple_open_fake::<E::G1Affine>(
+            &t_poly,
+            powers.as_slice(),
+            pp.poly_ck.powers_of_g[0],
+            h_domain_size
+        )
+    } else {
+        KZGCommit::<E>::multiple_open::<E::G1Affine>(
+            &t_poly,
+            &pp.poly_ck.powers_of_g,
+            h_domain_size
+        )
+    };
 
     CqProverInput {
         t_com,
@@ -1253,9 +1280,19 @@ mod tests {
     use crate::ramlookup::caulkplus::generate_caulkplus_prover_input;
     use super::*;
 
-    const h_domain_size: usize = 10;
-    const m_domain_size: usize = 3;
-    const k_domain_size: usize = 4;
+    const h_domain_size: usize = 20;
+    const m_domain_size: usize = 10;
+    const k_domain_size: usize = 18;
+
+    #[test]
+    pub fn test_setup() {
+        test_setup_helper::<Bls12_381>();
+    }
+
+    #[test]
+    pub fn test_run_full_protocol() {
+        test_run_full_protocol_helper::<Bls12_381>();
+    }
 
     #[test]
     pub fn test_cq_public_params() {
@@ -1270,6 +1307,116 @@ mod tests {
     #[test]
     pub fn test_compute_cq_proof() {
         test_compute_cq_proof_helper::<Bls12_381>();
+    }
+
+    fn test_setup_helper<E: PairingEngine>() {
+        // generate public parameters for the given h_domain_size
+        let N = 1usize << h_domain_size;
+        let m = 1usize << m_domain_size;
+        let max_degree = N;
+        let pp: PublicParameters<E> = PublicParameters::setup(&max_degree, &N, &m, &h_domain_size);
+
+        // generate CQ setup
+        // The new_fake function generates setup faster, but uses SRS trapdoor.
+        // This is only meant for testing and benchmarking
+        // Replace new_fake function with new() for correct generation using SRS only.
+        let cq_pp: CqPublicParams<E> = CqPublicParams::new_fake(&pp, h_domain_size);
+        cq_pp.store();
+    }
+
+    fn test_run_full_protocol_helper<E: PairingEngine>()
+    {
+
+        let N: usize = 1usize << h_domain_size;
+        let m: usize = 1usize << m_domain_size;
+        let K: usize = 1usize << k_domain_size;
+
+        let max_degree = N;
+
+        let mut rng = ark_std::test_rng();
+
+
+        // generate public parameters (SRS for KZG commitment scheme)
+        // This function will look for a pre-existing setup under the srs sub-directory for the size N
+        // and load the same if one exists
+        let pp: PublicParameters<E> = PublicParameters::setup(&max_degree, &N, &m, &h_domain_size);
+
+        // Generate/public parameters required for CQ
+        // This contains additional pre-computed parameters such as openings of lagrange polynomials
+        // Again, the function looks for existing setup for parameters of size N in the polys_cq sub-directory
+        let cq_pp: CqPublicParams<E> = CqPublicParams::load(h_domain_size);
+
+        // Uncomment this if the parameters do not exist for given h_domain_size.
+        // The function CqPublicParams::new() will generate parameters only using the srs, while
+        // the function new_fake() will generate parameters quicker (for testing) but using the srs trapdoor
+        // The latter is only provided for testing and benchmarking
+        // ----------------------------------------------------------------------------------------
+        // let cq_pp = CqPublicParams::<E>::new_fake(&pp, h_domain_size);
+        // cq_pp.store();
+        // ----------------------------------------------------------------------------------------
+
+        let mut base_table: Vec<usize> = Vec::new();
+        for _ in 0..N {
+            base_table.push(usize::rand(&mut rng) % 10000);
+        }
+
+        // Generate pre-processed parameters for the base table
+        // This will take a while, when using the srs. The use_fake = true option can
+        // be used for quicker generation
+        let mut start = Instant::now();
+        let table_pp: CqProverInput<E> = generate_cq_table_input(&base_table, &pp, h_domain_size, true);
+        println!("Generated table specific parameters in {} secs", start.elapsed().as_secs());
+
+        let mut current_table: Vec<usize> = base_table.clone();
+        // introduce upto K changes in current_table from base_table
+        for _ in 0..K {
+            let pos = usize::rand(&mut rng) % N;
+            current_table[pos] += usize::rand(&mut rng) % 1000;
+        }
+
+        // generate a sub-vector of current_table of size m
+        let mut f_vec: Vec<usize> = Vec::new();
+        for _ in 0..m {
+            f_vec.push(current_table[usize::rand(&mut rng) % N]);
+        }
+
+        // generate the CQ example corresponding to base table, updated table and sub-vector
+        start = Instant::now();
+        let example: CqExample<E::Fr> = CqExample::new_base_cache_example(&base_table, &current_table, &f_vec, h_domain_size, m_domain_size);
+        println!("Created example in {} msecs", start.elapsed().as_millis());
+
+        // generate CQ lookup proof
+        start = Instant::now();
+        let t_com = KZGCommit::<E>::commit_g2(&pp.g2_powers, &example.t_poly);
+        let f_com = KZGCommit::<E>::commit_g1(&pp.poly_ck, &example.f_poly);
+        println!("Committed instance polynomials in {} secs", start.elapsed().as_millis());
+
+        let instance: CqLookupInstance<E> = CqLookupInstance { t_com, f_com, m_domain_size, h_domain_size };
+        start = Instant::now();
+        let proof = compute_cq_proof::<E>(
+            &instance,
+            &table_pp,
+            &example,
+            &cq_pp,
+            &pp,
+            true
+        );
+        println!("Time to generate proof with updates  = {} msecs", start.elapsed().as_millis());
+
+        // verify the proof
+        start = Instant::now();
+        let result = verify_cq_proof::<E>(
+            &instance,
+            &proof,
+            &cq_pp,
+            &pp,
+        );
+        println!("Time to verify proof  = {} msecs", start.elapsed().as_millis());
+
+        println!("Verification Result [ {} ]", result);
+
+
+
     }
 
     fn test_compute_cq_proof_helper<E: PairingEngine>()
@@ -1381,7 +1528,8 @@ mod tests {
         let cp_prover_input = generate_cq_table_input(
             &t_vec,
             &pp,
-            h_domain_size
+            h_domain_size,
+            false,
         );
         println!("Time to generate table inputs = {}", start.elapsed().as_secs());
         cp_prover_input.store(h_domain_size);
