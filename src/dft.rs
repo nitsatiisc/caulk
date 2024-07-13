@@ -834,25 +834,30 @@ pub mod tests {
         //use ark_test_curves::bls12_381:
         //use E::G1Projective as GProjective;
         //use E::G1Affine as GAffine;
-        let k_domain_size: usize = 19;
+        let k_domain_size: usize = 25;
         let vec_size: usize = 1024 + (1 << k_domain_size);
         let mut grp_vec: Vec<E::G1Affine> = Vec::new();
         let mut scalar_vec: Vec<<E::Fr as PrimeField>::BigInt> = Vec::new();
-
+        let mut f_vec: Vec<E::Fr> = Vec::new();
         for _ in 0..vec_size {
             grp_vec.push(E::G1Projective::rand(&mut rng).into_affine());
             scalar_vec.push(<E::Fr as PrimeField>::BigInt::rand(&mut rng));
+            f_vec.push(E::Fr::rand(&mut rng));
+
         }
+
+        let mut start = Instant::now();
+        /*
 
         let mut start = Instant::now();
         let prod = VariableBaseMSM::multi_scalar_mul(grp_vec.as_slice(), scalar_vec.as_slice());
         println!("MSM took {} secs", start.elapsed().as_millis());
         //println!("Product: {:?}", prod);
-
-        let mut prod = E::G1Affine::zero();
+        */
+        let mut prod = E::Fr::zero();
         start = Instant::now();
         for i in 0..vec_size {
-            prod = prod + (grp_vec[i].mul(scalar_vec[i])).into();
+            prod = prod + (f_vec[i] * f_vec[i]);
         }
 
         println!("Naive sum took {} secs", start.elapsed().as_secs());

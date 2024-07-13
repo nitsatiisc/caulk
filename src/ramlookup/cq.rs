@@ -354,6 +354,85 @@ impl<F: PrimeField> CqExample<F> {
         }
 
     }
+
+    pub fn new_base_cache_example(
+        base_table: &Vec<usize>,
+        current_table: &Vec<usize>,
+        f_vec: &Vec<usize>,
+        h_domain_size: usize,
+        m_domain_size: usize,
+    ) -> CqExample<F> {
+        assert_eq!(base_table.size(), 1usize << h_domain_size, "base_table size mismatch");
+        assert_eq!(current_table.size(), 1usize << h_domain_size, "current_table size mismatch");
+        assert_eq!(f_vec.size(), 1usize << m_domain_size, "sub-vector size mismatch");
+
+        let mut rng = ark_std::test_rng();
+        let m:usize  = 1usize << m_domain_size;
+
+        // ensure f_vec is sub-vector of current_table
+        let mut c_set: HashSet<usize> = HashSet::new();
+        for i in 0..current_table.len() {
+            c_set.insert(current_table[i]);
+        }
+
+        for i in 0..f_vec.len() {
+            assert_eq!(c_set.contains(&f_vec[i]), true, "incorrect sub-vector");
+        }
+
+        // compute the multiplicities vector
+        let mut m_vec: HashMap<usize, F> = HashMap::new();
+        let m_f = frequency_finder(&f_vec);
+        let mut m_set: HashSet<usize> = HashSet::new();
+        let mut m_seen: HashSet<usize> = HashSet::new();
+        for i in 0..current_table.len() {
+            if m_f.contains_key(&current_table[i]) && !m_seen.contains(&current_table[i]) {
+                let x_f = *m_f.get(&current_table[i]).unwrap();
+                m_vec.insert(i, F::from(x_f as u128));
+                m_set.insert(i);
+                m_seen.insert(current_table[i]);
+            }
+        }
+
+        // extend the m_set to length m, add with m_i = 0
+        while m_vec.len() < m {
+            let pos = usize::rand(&mut rng) % current_table.len();
+            if !m_vec.contains_key(&pos) {
+                m_vec.insert(pos, F::zero());
+                m_set.insert(pos);
+            }
+        }
+
+        let mut i_set_vec: Vec<usize> = m_set.clone().into_iter().collect::<Vec<_>>();
+        assert_eq!(i_set_vec.len(), m, "i_set size not m");
+        let mut k_set_vec = i_set_vec.clone();
+        let mut k_set = m_set.clone();
+
+        // add positions to k_set where the current table differs from base table
+        for i in 0..current_table.len() {
+
+        }
+
+
+
+
+
+
+
+
+
+
+        CqExample::<F> {
+            table: vec![],
+            f_vec: vec![],
+            f_poly: DensePolynomial { coeffs: vec![] },
+            m_vec: m_vec,
+            i_set: vec![],
+            k_set: vec![],
+            t_j_vec: vec![],
+            t_poly: DensePolynomial { coeffs: vec![] },
+        }
+
+    }
 }
 
 /**
@@ -540,9 +619,6 @@ pub fn verify_cq_proof<E: PairingEngine>(
     true
 }
 
-
-
-
 pub struct CqLookupInputRound1<E: PairingEngine> {
     pub phi_com: E::G1Affine,
 }
@@ -569,6 +645,12 @@ pub struct CqLookupInputRound3<E: PairingEngine> {
 }
 
 
+/**
+ * Compute the update to the encoded quotient computed from the base table
+ * using the difference between current and base table (the cache table)
+ * This is accomplished via the algorithm described in Section 7,
+ * "Fast Lookups from Approximate Pre-processing" in the paper https://eprint.iacr.org/2024/840.pdf
+ */
 pub fn compute_encoded_quotient_delta<E: PairingEngine>(
     delta_input: &CqDeltaInput<E>,
     cq_pp: &CqPublicParams<E>,
@@ -580,6 +662,7 @@ pub fn compute_encoded_quotient_delta<E: PairingEngine>(
 
     let mut start = Instant::now();
 
+    // compute the scalars a_i, i\in I and b_j,j \in K according to the paper.
     let (a_vec, b_vec) = compute_scalar_coefficients::<E::Fr>(
         &delta_input.t_j_vec,
         &delta_input.c_i_vec,
@@ -588,7 +671,6 @@ pub fn compute_encoded_quotient_delta<E: PairingEngine>(
         domain_size,
         &mut cache,
     );
-
 
     println!("Scalar computation took {} msec", start.elapsed().as_millis());
     // prepare for MSM
@@ -624,31 +706,50 @@ pub fn compute_encoded_quotient_delta<E: PairingEngine>(
     a_com.add(a1_com.into_affine())
 }
 
+/**
+ * Prover computation for round 1 of the CQ protocol
+ * This involves commitment to the sparse multiplicity polynomial
+ * phi(X) which interpolates multiplicity m_i at \omega^i
+ */
+pub fn compute_prover_round1<E: PairingEngine>(
+    example: &CqExample<E::Fr>,
+    h_domain_size: usize,
+    cq_pp: &CqPublicParams<E>,
 
-
-fn compute_prover_round3<E: PairingEngine>(
-    gamma: E::Fr,
-    eta: E::Fr,
-    round2: &CqLookupInputRound2<E>,
-    pp: &PublicParameters<E>,
-) -> CqLookupInputRound3<E> {
-    // Compute aggregated poly H(X) = B_0(X) + eta f(X) + eta^2 Q_B(X)
-    // and provide a KZG proof of evaluation of H(X) at X=gamma.
-    let h_poly = &round2.b0_poly + &(&round2.f_poly.mul(eta) + &round2.qb_poly.mul(eta.square()));
-    let (h_gamma, pi_h) = KZGCommit::<E>::open_g1_batch(
-        &pp.poly_ck,
-        &h_poly,
-        None,
-        &[gamma]
-    );
-
-    CqLookupInputRound3::<E> {
-        h_poly: h_poly,
-        h_gamma: h_gamma[0],
-        pi_h: pi_h
+) -> CqLookupInputRound1<E>
+{
+    // commitment to the phi poly is computed
+    let h_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(1usize << h_domain_size).unwrap();
+    let N = h_domain.size();
+    let mut scalars = Vec::<E::Fr>::new();
+    let mut gelems: Vec<E::G1Affine> = Vec::new();
+    for iter in &example.m_vec {
+        // we scale each m_i with \omega^i, as the precomputed parameters
+        // contain quotients [Z_H(X)/X-\omega^i] and not [\lambda_i(X)]
+        // These differ by scalar factor of \omega^i/N, the latter scaling by 1/N is applied
+        // to the final scalar product.
+        scalars.push(iter.1.mul(h_domain.element(*iter.0)));
+        gelems.push(cq_pp.openings_z_h_poly[*iter.0])
     }
+
+    let phi_com = VariableBaseMSM::multi_scalar_mul(&gelems,
+                                                    &scalars.clone().into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
+
+    let phi_com = phi_com.into_affine().mul(E::Fr::from(N as u128).inverse().unwrap()).into_affine();
+    CqLookupInputRound1 { phi_com }
 }
 
+/**
+ * in round two, prover computes:
+ * (i) the A polynomial that interpolates m_i/(\beta + t_i) at i^{th} N^th root of unity, and commitment to it.
+ * (ii) Computes commitment to quotient polynomial Q_A satisfying A(X)(\beta + t(X)) - m(X) = Q_A(X).Z_H(X). Note the commitment is directly computed
+ *  from pre-computed quotients, without computing the polynomial itself.
+ * (iii) Computes polynomial B(X) interpolating 1/(\beta + f_i) at i^{th} m^th root of unity.
+ * (iv) Computes and commits to polynomial B_0(X) = (B(X) - B(0))/X
+ * (v) Computes and commits to Q_B polynomial satisfying B(X)(\beta + f(X))-1 = Q_B(X).Z_V(X)
+ * (vi) Computes and commits to polynomial P(X) = B_0(X).X^{N-1-(n-2)}. This polynomial is used to upper-bound the degree of B_0.
+ */
+#[allow(non_snake_case)]
 fn compute_prover_round2<E: PairingEngine>(
     beta: E::Fr,
     instance: &CqLookupInstance<E>,
@@ -657,13 +758,11 @@ fn compute_prover_round2<E: PairingEngine>(
     cq_pp: &CqPublicParams<E>,
     pp: &PublicParameters<E>) -> CqLookupInputRound2<E> {
 
-    // compute non-zero lagrange coefficients A_i = m_i/(t_i + \beta)
     let h_domain = GeneralEvaluationDomain::<E::Fr>::new(1 << instance.h_domain_size).unwrap();
     let m_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(1 << instance.m_domain_size).unwrap();
 
     let N = h_domain.size();
-    let m = m_domain.size();
-
+    // compute non-zero lagrange coefficients A_i = m_i/(t_i + \beta)
     // scalars_A will contain A_i.(w^i): This is because our openings are for [Z_H(X)/X-w^i] and not L_i(X)
     // scalars_A0 will simply contain A_i's
     // gens_A will contain respective openings [Z_H(X)/X-w^i]
@@ -689,12 +788,12 @@ fn compute_prover_round2<E: PairingEngine>(
     }
     // Compute commitment [A(X)] = \sum_{i}A_i[L_i(X)]. Scale by 1/N after the multi-exp
     let a_com = VariableBaseMSM::multi_scalar_mul(&gens_A,
-                                                    &scalars_A.clone().into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
+                                                  &scalars_A.clone().into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
     let a_com = a_com.into_affine().mul(E::Fr::from(N as u128).inverse().unwrap()).into_affine();
 
-    // Compute commitment [Q_A(X)] = \sum_{i}A_i[Q_i(X)] where Q_i(X)=(T(X)-T(w^i))/(X-w^i). Scale by 1/N as before.
+    // Compute commitment [Q_A(X)] = \sum_{i}A_i[Q_i(X)] where Q_i(X)=(1/N)w^i(T(X)-T(w^i))/(X-w^i). Scale by 1/N as before.
     let qa_com = VariableBaseMSM::multi_scalar_mul(&gens_Q,
-                                                &scalars_A.clone().into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
+                                                   &scalars_A.clone().into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
     let qa_com = qa_com.into_affine().mul(E::Fr::from(N as u128).inverse().unwrap()).into_affine();
 
     // next we interpolate the B polynomial which evaluates to 1/(beta + f_i) on Z_V
@@ -735,8 +834,10 @@ fn compute_prover_round2<E: PairingEngine>(
     for i in 0..scalars_A0.len() {
         sum_A0.add_assign(scalars_A0[i]);
     }
+
+
     let a0_com_1 = VariableBaseMSM::multi_scalar_mul(&gens_A,
-        &scalars_A0.into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
+                                                     &scalars_A0.into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
     let a0_com_2 = pp.poly_ck.powers_of_g[N-1].mul(sum_A0);
     let a0_com: E::G1Affine = a0_com_1.into_affine() + a0_com_2.into_affine().neg();
     let a0_com = a0_com.mul(E::Fr::from(N as u128).inverse().unwrap()).into_affine();
@@ -757,29 +858,34 @@ fn compute_prover_round2<E: PairingEngine>(
     }
 }
 
-pub fn compute_prover_round1<E: PairingEngine>(
-    example: &CqExample<E::Fr>,
-    h_domain_size: usize,
-    cq_pp: &CqPublicParams<E>,
+/**
+ * In round 3, prover provides aggregated KZG proof for evaluations
+ * of polynomials sent in earlier rounds
+ */
+fn compute_prover_round3<E: PairingEngine>(
+    gamma: E::Fr,
+    eta: E::Fr,
+    round2: &CqLookupInputRound2<E>,
+    pp: &PublicParameters<E>,
+) -> CqLookupInputRound3<E> {
+    // Compute aggregated poly H(X) = B_0(X) + eta f(X) + eta^2 Q_B(X)
+    // and provide a KZG proof of evaluation of H(X) at X=gamma.
+    let h_poly = &round2.b0_poly + &(&round2.f_poly.mul(eta) + &round2.qb_poly.mul(eta.square()));
+    let (h_gamma, pi_h) = KZGCommit::<E>::open_g1_batch(
+        &pp.poly_ck,
+        &h_poly,
+        None,
+        &[gamma]
+    );
 
-) -> CqLookupInputRound1<E>
-{
-    // commitment to the phi poly is computed
-    let h_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(1usize << h_domain_size).unwrap();
-    let N = h_domain.size();
-    let mut scalars = Vec::<E::Fr>::new();
-    let mut gelems: Vec<E::G1Affine> = Vec::new();
-    for iter in &example.m_vec {
-        scalars.push(iter.1.mul(h_domain.element(*iter.0)));
-        gelems.push(cq_pp.openings_z_h_poly[*iter.0])
+    CqLookupInputRound3::<E> {
+        h_poly: h_poly,
+        h_gamma: h_gamma[0],
+        pi_h: pi_h
     }
-
-    let phi_com = VariableBaseMSM::multi_scalar_mul(&gelems,
-                                                    &scalars.clone().into_iter().map(|x| x.into_repr()).collect::<Vec<_>>());
-
-    let phi_com = phi_com.into_affine().mul(E::Fr::from(N as u128).inverse().unwrap()).into_affine();
-    CqLookupInputRound1 { phi_com }
 }
+
+
 
 // Structures for reading/storing table parameters
 #[derive(Debug, PartialEq)]

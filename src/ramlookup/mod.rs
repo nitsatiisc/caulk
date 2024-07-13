@@ -1249,5 +1249,82 @@ mod tests {
 
         println!("Verification Status [ {} ]", status);
     }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn cost_simulation() {
+        let depth: usize = 5;
+        let totalops: usize = 1usize << 20;
+        let delta: usize = 1usize << 17;
+        let mut rng = rand::thread_rng();
+
+
+        // a vector to model accounting tree as a binary tree.
+        // Indices (2i+1, 2i+2) are the left and right children of
+        // index i. Conversely, the parent of i is given by integer division (i-1)/2
+        let mut tree: Vec<usize> = Vec::new();
+        let num_nodes: usize = (1usize << (depth + 1)) - 1;
+        tree.resize(num_nodes, 0);
+
+        // start simulation and accumulate the cost
+        let mut cost: f64 = 0.0;
+        let mut tcost: usize = 0;
+
+
+        for _ in 0..totalops {
+            let mut current_idx:usize = 0;
+            tree[current_idx] += 1;
+
+            for j in 0..depth {
+                // randomly pick left or right child to add the operation to
+                current_idx = 2*current_idx + 1 + (rng.gen::<usize>() % 2);
+                tree[current_idx] += 1;
+            }
+
+            // prune the tree accumulating the cost
+            let mut cur_node:usize = 0;
+            let mut level_threshold = delta;
+            let mut level_tab_size: usize = totalops;
+            if (tree[cur_node] >= level_threshold) {
+                let start_dist = tree[cur_node];
+                for _ in 0..depth {
+                    // find next node with >= level_threshold/2
+                    level_threshold /= 2;
+                    level_tab_size /= 2;
+                    if tree[2*cur_node + 1] >= level_threshold {
+                        cur_node = 2*cur_node + 1;
+                    } else {
+                        cur_node = 2*cur_node + 2;
+                    }
+                }
+
+                // at this point, cur_node points to the leaf node that
+                // needs to be processed.
+                let adj = tree[cur_node];
+                tcost += level_tab_size;
+
+                // travel backwards and update the distances of the nodes
+                tree[cur_node] -= adj;
+                for _ in 0..depth {
+                    cur_node = (cur_node - 1)/2;
+                    tree[cur_node] -= adj;
+                }
+
+                println!("start_dist: {}, adj: {}", start_dist, adj);
+                assert_eq!(tree[0], start_dist - adj, "Incorrect dist adjustment");
+
+            }
+
+        }
+
+        cost = (tcost as f64).div(totalops as f64);
+        println!("Average cost: {}", cost);
+
+
+
+
+
+
+    }
 }
 
