@@ -27,3 +27,28 @@ the protocols for checking well formation of time ordered transcript and address
 We hope to implement remaining protocols in the future, but they are not critical to overall benchmarks, as these are 
 over much smaller tables.
 
+## Running Benchmarks for CQ Argument from Updatable Tables
+This scenario considers two tables, which we call `base_table`, for which we have pre-computed cached quotients (as in the CQ protocol), and `current_table`
+which differs from the `base_table` at some $K$ locations. Moreover, we consider a sub-vector `f_vec` of `current_table` of size $m$. The example here 
+constructs an argument for showing `f_vec` is a sub-vector of `current_table`. To run this example one executes the following command from the repository root directory (one containing `Cargo.toml`).
+
+```shell
+~/.cargo/bin/cargo test --color=always --release --package caulk --lib ramlookup::cq::tests::test_run_full_protocol -- --exact --nocapture
+```
+The above command assumes cargo is installed in the user's home directory. It should be changed appropriately to point to the rust installation. The above command runs the test function 
+`test_run_full_protocol` in the file `src/ramlookup/cq.rs`. The test can be run for different parameters by changing the following constants in the test module in the same file.
+
+```rust 
+mod tests {
+    use std::time::Instant;
+    use ark_bls12_381::Bls12_381;
+    use super::*;
+
+    const h_domain_size: usize = 20;
+    const m_domain_size: usize = 10;
+    const k_domain_size: usize = 18;
+    // ...
+}
+```
+Here `N=1 << h_domain_size` gives the size of the tables, `m=1 << m_domain_size` gives the size of the sub-vector while `K=1 << k_domain_size` gives the maximum hamming distance between the base table 
+and the current table.

@@ -1277,7 +1277,6 @@ pub fn generate_cq_table_input<E: PairingEngine>(
 mod tests {
     use std::time::Instant;
     use ark_bls12_381::Bls12_381;
-    use crate::ramlookup::caulkplus::generate_caulkplus_prover_input;
     use super::*;
 
     const h_domain_size: usize = 20;
