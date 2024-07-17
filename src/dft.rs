@@ -193,7 +193,7 @@ pub fn fast_div_poly_cache<F>(
 
     let l = poly_f.degree() - poly_g.degree() + 1;
     //@todo Disable the cache for now, as cache handling is incorrect. We only need reciprocal of X^l/g in cache. Fix later
-    cache.invert_poly_map.clear();
+    //cache.invert_poly_map.clear();
     match cache.invert_poly_map.contains_key(&(poly_g_index, l)) {
         true => { quotient = cache.invert_poly_map.get(&(poly_g_index, l)).unwrap().clone(); cache.cache_hits += 1; }
         false => {
@@ -205,13 +205,14 @@ pub fn fast_div_poly_cache<F>(
                     &(&poly_f).into(),
                     &(poly_g).into()
                 ).unwrap();
-                cache.invert_poly_map.insert((poly_g_index, l), quotient.clone());
+                //cache.invert_poly_map.insert((poly_g_index, l), quotient.clone());
                 return (quotient, remainder);
             }
 
             let poly_g_coeffs = &poly_g.coeffs;
             let poly_f_rev_coeffs: Vec<F> = poly_f_coeffs.iter().copied().rev().collect::<Vec<F>>();
             let poly_g_rev_coeffs: Vec<F> = poly_g_coeffs.iter().copied().rev().collect::<Vec<F>>();
+
 
             let poly_inv_rev_g = fast_invert_poly(&poly_g_rev_coeffs, l);
             let poly_f_rev: DensePolynomial<F> = DensePolynomial::from_coefficients_vec(poly_f_rev_coeffs);
@@ -834,7 +835,7 @@ pub mod tests {
         //use ark_test_curves::bls12_381:
         //use E::G1Projective as GProjective;
         //use E::G1Affine as GAffine;
-        let k_domain_size: usize = 25;
+        let k_domain_size: usize = 22;
         let vec_size: usize = 1024 + (1 << k_domain_size);
         let mut grp_vec: Vec<E::G1Affine> = Vec::new();
         let mut scalar_vec: Vec<<E::Fr as PrimeField>::BigInt> = Vec::new();
@@ -847,13 +848,13 @@ pub mod tests {
         }
 
         let mut start = Instant::now();
-        /*
+
 
         let mut start = Instant::now();
         let prod = VariableBaseMSM::multi_scalar_mul(grp_vec.as_slice(), scalar_vec.as_slice());
         println!("MSM took {} secs", start.elapsed().as_millis());
         //println!("Product: {:?}", prod);
-        */
+
         let mut prod = E::Fr::zero();
         start = Instant::now();
         for i in 0..vec_size {
@@ -944,8 +945,8 @@ pub mod tests {
     fn test_poly_mult_helper<E: PairingEngine>() {
         let mut rng = test_rng();
 
-        let degree: usize = 1usize << 16;
-        let npolys: usize = 100;
+        let degree: usize = 1usize << 20;
+        let npolys: usize = 1;
         let mut rand_A_polys: Vec<DensePolynomial<E::Fr>> = Vec::new();
         let mut rand_B_polys: Vec<DensePolynomial<E::Fr>> = Vec::new();
         let mut rand_C_polys: Vec<DensePolynomial<E::Fr>> = Vec::new();
@@ -974,19 +975,19 @@ pub mod tests {
         println!("FFT multiplication with eval domain took {} secs", start.elapsed().as_secs());
         rand_C_polys.clear();
 
-        let input_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(1usize << 17).unwrap();
+        let input_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(1usize << 21).unwrap();
 
         start = Instant::now();
-        let mut fft_C: Vec<E::Fr> = Vec::with_capacity(1usize << 17);
-        fft_C.resize(1usize << 17, E::Fr::zero());
+        let mut fft_C: Vec<E::Fr> = Vec::with_capacity(1usize << 21);
+        fft_C.resize(1usize << 21, E::Fr::zero());
 
         for i in 0..npolys {
-            let fft_A: Vec<E::Fr> = field_fft_domain(&rand_A_polys[i].coeffs, 17, &input_domain);
-            let fft_B: Vec<E::Fr> = field_fft_domain(&rand_B_polys[i].coeffs, 17, &input_domain);
+            let fft_A: Vec<E::Fr> = field_fft_domain(&rand_A_polys[i].coeffs, 21, &input_domain);
+            let fft_B: Vec<E::Fr> = field_fft_domain(&rand_B_polys[i].coeffs, 21, &input_domain);
             for j in 0..fft_A.len() {
                 fft_C[j] = fft_A[j] * fft_B[j];
             }
-            let fft_res: Vec<E::Fr> = field_ifft_domain(&fft_C, 17, &input_domain);
+            let fft_res: Vec<E::Fr> = field_ifft_domain(&fft_C, 21, &input_domain);
             rand_C_polys.push(DensePolynomial::from_coefficients_vec(fft_res));
         }
 

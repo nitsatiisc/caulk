@@ -93,7 +93,7 @@ Here `N=1 << h_domain_size` gives the size of the tables, `m=1 << m_domain_size`
 and the current table. Note that the above example does not store the table specific parameters for subsequent tests. Since generating parameters for a table is time-consuming, to run several benchmarks
 on a table, we support set of benchmarks on fixed base tables of various sizes, whose parameters can be stored. We discuss these below.
 
-### Benchmarks Online Phase using Pre-Processed Tables
+### Benchmarking Online Phase using Pre-Processed Tables
 Whenever the test function 
 ```shell
 ~/.cargo/bin/cargo test --release --package caulk --lib ramlookup::cq::tests::test_cq_table_params -- --exact --nocapture
@@ -103,4 +103,5 @@ approximate tables by running the test:
 ```rust
 ~/.cargo/bin/cargo test --release --package caulk --lib ramlookup::cq::tests::test_compute_cq_proof -- --exact --nocapture
 ```
-Once again, one sets the parameters `h_domain_size, m_domain_size` and `k_domain_size` for obtaining different benchmarks.
+Once again, one sets the parameters `h_domain_size, m_domain_size` and `k_domain_size` for obtaining different benchmarks. This test uses a base table in `polys_cq` directory corresponding to the size
+parameter `h_domain_size`. 

@@ -11,6 +11,7 @@ use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial, UVPolynomi
 use ark_poly::univariate::DensePolynomial;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{cfg_into_iter, UniformRand};
+use colored;
 use elements_frequency::interface::frequency_finder;
 use crate::multi::TableInput;
 use crate::{CaulkTranscript, field_dft, group_dft, InvertPolyCache, KZGCommit, PublicParameters};
@@ -1250,7 +1251,7 @@ pub fn generate_cq_table_input<E: PairingEngine>(
         power.mul_assign(beta);
     }
 
-    let openings_t_poly = if !use_fake {
+    let openings_t_poly = if use_fake {
         KZGCommit::<E>::multiple_open_fake::<E::G1Affine>(
             &t_poly,
             powers.as_slice(),
@@ -1277,11 +1278,12 @@ pub fn generate_cq_table_input<E: PairingEngine>(
 mod tests {
     use std::time::Instant;
     use ark_bls12_381::Bls12_381;
+    use colored::Colorize;
     use super::*;
 
     const h_domain_size: usize = 20;
     const m_domain_size: usize = 10;
-    const k_domain_size: usize = 18;
+    const k_domain_size: usize = 17;
 
     #[test]
     pub fn test_setup() {
@@ -1310,22 +1312,44 @@ mod tests {
 
     fn test_setup_helper<E: PairingEngine>() {
         // generate public parameters for the given h_domain_size
-        let N = 1usize << h_domain_size;
-        let m = 1usize << m_domain_size;
-        let max_degree = N;
-        let pp: PublicParameters<E> = PublicParameters::setup(&max_degree, &N, &m, &h_domain_size);
 
-        // generate CQ setup
-        // The new_fake function generates setup faster, but uses SRS trapdoor.
-        // This is only meant for testing and benchmarking
-        // Replace new_fake function with new() for correct generation using SRS only.
-        let cq_pp: CqPublicParams<E> = CqPublicParams::new_fake(&pp, h_domain_size);
-        cq_pp.store();
+        let h_domain_sizes: Vec<usize> = vec![16, 17, 18, 19, 20];
+
+        for i in 0..h_domain_sizes.len() {
+            let N = 1usize << h_domain_sizes[i];
+            let m = 1usize << m_domain_size;
+            let max_degree = N;
+            // Generate SRS for degree N
+            let pp: PublicParameters<E> = PublicParameters::setup(&max_degree, &N, &m, &h_domain_sizes[i]);
+
+            // generate CQ setup
+            // The new_fake function generates setup faster, but uses SRS trapdoor.
+            // This is only meant for testing and benchmarking
+            // Replace new_fake function with new() for correct generation using SRS only.
+            let cq_pp: CqPublicParams<E> = CqPublicParams::new_fake(&pp, h_domain_sizes[i]);
+            cq_pp.store();
+
+            // Generate table parameters for table of size N
+            // These are generated using fake flag set to true to save time.
+            let mut t_vec: Vec<usize> = Vec::new();
+            for i in 0..N {
+                t_vec.push(i);
+            }
+
+            let mut start = Instant::now();
+            let cp_prover_input = generate_cq_table_input(
+                &t_vec,
+                &pp,
+                h_domain_sizes[i],
+                true,
+            );
+            println!("Time to generate table inputs for size {} =  {} secs", h_domain_sizes[i], start.elapsed().as_secs());
+            cp_prover_input.store(h_domain_sizes[i]);
+        }
     }
 
     fn test_run_full_protocol_helper<E: PairingEngine>()
     {
-
         let N: usize = 1usize << h_domain_size;
         let m: usize = 1usize << m_domain_size;
         let K: usize = 1usize << k_domain_size;
@@ -1400,7 +1424,7 @@ mod tests {
             &pp,
             true
         );
-        println!("Time to generate proof with updates  = {} msecs", start.elapsed().as_millis());
+        println!("{}: {} msecs", "Proof Generation Time".bold(), start.elapsed().as_millis());
 
         // verify the proof
         start = Instant::now();
@@ -1410,12 +1434,9 @@ mod tests {
             &cq_pp,
             &pp,
         );
-        println!("Time to verify proof  = {} msecs", start.elapsed().as_millis());
+        println!("{}  = {} msecs", "Proof Verification Time".bold(), start.elapsed().as_millis());
 
-        println!("Verification Result [ {} ]", result);
-
-
-
+        println!("Verification Result [ {} ]", result.to_string().bold());
     }
 
     fn test_compute_cq_proof_helper<E: PairingEngine>()
@@ -1454,7 +1475,7 @@ mod tests {
             &pp,
             true
         );
-        println!("Time to generate proof with updates  = {} msecs", start.elapsed().as_millis());
+        println!("{}: {} msecs", "Proof Generation Time".bold(), start.elapsed().as_millis());
 
         // verify the proof
         start = Instant::now();
@@ -1464,10 +1485,9 @@ mod tests {
             &cq_pp,
             &pp,
         );
-        println!("Time to verify proof  = {} msecs", start.elapsed().as_millis());
+        println!("{}: {} msecs", "Proof Verification Time".bold(), start.elapsed().as_millis());
 
-        println!("Verification Result [ {} ]", result);
-
+        println!("Verification Result [ {} ]", result.to_string().bold());
     }
 
     fn test_cq_public_params_helper<E: PairingEngine>()
@@ -1494,19 +1514,18 @@ mod tests {
             let w = usize::rand(&mut rng) % N;
             // real check for Z_H(X)=(X-w).opening[w]
             assert_eq!(E::pairing(g1, cq_pp.z_h_com),
-                       E::pairing(cq_pp.openings_z_h_poly[w],g2x + g2.mul(h_domain.element(w)).into_affine().neg()));
+                       E::pairing(cq_pp.openings_z_h_poly[w], g2x + g2.mul(h_domain.element(w)).into_affine().neg()));
             // real check for log_poly
             assert_eq!(E::pairing(g1, cq_pp.log_poly_com + g2.mul(E::Fr::from(w as u128)).neg().into_affine()),
-                       E::pairing(cq_pp.openings_log_poly[w],g2x + g2.mul(h_domain.element(w)).neg().into_affine()));
+                       E::pairing(cq_pp.openings_log_poly[w], g2x + g2.mul(h_domain.element(w)).neg().into_affine()));
 
             // check openings for mu polys
             let N_inv = E::Fr::from(N as u128).inverse().unwrap();
             let factor = N_inv.mul(h_domain.element(w));
             let mu_poly_com = cq_pp.openings_z_h_poly[w].mul(factor).into_affine();
             assert_eq!(E::pairing(mu_poly_com + g1.neg(), g2),
-                       E::pairing(cq_pp.openings_mu_polys[w],g2x + g2.mul(h_domain.element(w)).neg().into_affine()));
+                       E::pairing(cq_pp.openings_mu_polys[w], g2x + g2.mul(h_domain.element(w)).neg().into_affine()));
         }
-
     }
 
     fn test_cq_table_params_helper<E: PairingEngine>()
@@ -1551,8 +1570,6 @@ mod tests {
                        E::pairing(cp_prover_input.openings_t_poly[i],g2x + g2.mul(h_domain.element(i)).neg().into_affine()));
         }
         */
-
     }
 }
-
 
