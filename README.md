@@ -39,6 +39,15 @@ sudo apt install curl
 ```shell
  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain none -y
 ```
+
+- Unpack the project archive in a suitable directory. In the project root directory, create folders for storing `srs` and table parameters.
+```shell
+mkdir -p ./srs ./polys_cq
+```
+
+- Generate SRS and CQ public parameters. This generates SRS and commitments to certain polynomials independent of the table. The following command from the project root directory generates 
+the required parameters in the subdirectory `poly_cq` for several table sizes. This step can take approximately 30 minutes.
+
 - Restart the terminal and install cargo using rustup using the following command.
 ```shell
 rustup default stable
@@ -61,11 +70,31 @@ described in [Fast KZG Proofs](https://eprint.iacr.org/2023/033). This step can 
 ~/.cargo/bin/cargo test --release --package caulk --lib ramlookup::cq::tests::test_cq_table_params -- --exact --nocapture
 ```
 The above command runs the offline parameter generation for table of size `1 << h_domain_size` and the parameters are stored under the `polys_cq` directory. The parameters are generated for
-the table given by the vector $(0,1,\ldots,N-1)$. The table and the pre-processed parameters are automatically loaded with the function:
+the table given by the vector $(0,1,\ldots,N-1)$. The stored parameters can be used for subsequent benchmarks. The parameter `h_domain_size` can be modified in the test module in the file `src/ramlookup/cq.rs`.
 
 ```rust 
-let table_pp: CqProverInput<E> = CqProverInput::load(h_domain_size);
+mod tests {
+    use std::time::Instant;
+    use ark_bls12_381::Bls12_381;
+    use super::*;
+
+    const h_domain_size: usize = 20;
+    const m_domain_size: usize = 10;
+    const k_domain_size: usize = 18;
+    // ...
+}
 ```
+The following is the summary of offline phase when run on different table sizes on a Ubuntu Linux 22.04 platform with Intel® Core™ i5-9400F CPU @ 2.90GHz.
+
+| Table Size | Offline Preprocessing Time (s) |
+|:---------:| :-----------------------------: |
+|  $2^{10}$ | 7 |
+|  $2^{12}$ | 29 | 
+ | $2^{14}$ | 135 |
+ | $2^{16}$ | 620 |
+  | $2^{18}$ | 2766 |
+| $2^{20}$ | 12000 |
+
 
 ### Benchmarking Online Phase
 This scenario considers two tables, which we call `base_table`, for which we have pre-computed cached quotients (as in the CQ protocol), and `current_table`
@@ -115,3 +144,7 @@ approximate tables by running the test:
 ```
 Once again, one sets the parameters `h_domain_size, m_domain_size` and `k_domain_size` for obtaining different benchmarks. This test uses a base table in `polys_cq` directory corresponding to the size
 parameter `h_domain_size`. 
+
+One expects to see the following performance for the online phase for a table size of 1 million.
+
+![img.png](img.png)
