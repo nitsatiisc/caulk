@@ -28,11 +28,21 @@ We hope to implement remaining protocols in the future, but they are not critica
 over much smaller tables.
 
 ## Preparation
-- Install rust/cargo if not installed. On Ubuntu based Linux distributions, this may be done via the following command:
+These instructions have been tested on recent Ubuntu Linux Distributions.
+
+- Install curl if not already installed. On most Ubuntu Systems it might only take the following:
+```shell
+sudo apt install curl
+```
+- 
+- Install rust if not installed. On Ubuntu based Linux distributions, this may be done via the following command:
 ```shell
  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain none -y
 ```
-
+- Restart the terminal and install cargo using rustup using the following command.
+```shell
+rustup default stable
+```
 - Generate SRS and CQ public parameters. This generates SRS and commitments to certain polynomials independent of the table. This must be done once for each table size being benchmarked (given by)
 the `h_domain_size` constant. The following command from the project root directory generates the required parameters in the subdirectory `poly_cq`. Depending on the value of `h_domain_size` this 
 can take from about a minute to an hour.
