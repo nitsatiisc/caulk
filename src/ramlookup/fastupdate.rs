@@ -407,12 +407,11 @@ mod tests {
         let mut t_j_vec: Vec<E::Fr> = Vec::new();
 
         for i in 0..i_set.len() {
-            //c_i_vec.push(E::Fr::rand(&mut rng));
-            c_i_vec.push(E::Fr::one());
+            c_i_vec.push(E::Fr::rand(&mut rng));
         }
 
         for i in 0..k_set.len() {
-            t_j_vec.push(E::Fr::one());
+            t_j_vec.push(E::Fr::rand(&mut rng));
         }
 
         let mut cache = InvertPolyCache::<E::Fr>::new();
@@ -469,9 +468,7 @@ mod tests {
         let evals_I_naive = compute_reciprocal_sum_naive(&t_j_vec, &k_set, &i_set, &h_domain, h_domain_size);
         println!("Naive computation took {} secs", start.elapsed().as_secs());
 
-       // for i in 0..evals_I.len() {
-       //     assert_eq!(evals_I[i], evals_I_naive[i], "Vectors don't match at {}", i);
-       // }
+
     }
 
 
