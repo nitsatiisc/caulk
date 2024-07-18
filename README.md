@@ -34,12 +34,16 @@ These instructions have been tested on recent Ubuntu Linux Distributions.
 ```shell
 sudo apt install curl
 ```
-- 
+
 - Install rust if not installed. On Ubuntu based Linux distributions, this may be done via the following command:
 ```shell
  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain none -y
 ```
 
+- Restart the terminal and install cargo.
+```shell
+rustup default stable
+```
 - Unpack the project archive in a suitable directory. In the project root directory, create folders for storing `srs` and table parameters.
 ```shell
 mkdir -p ./srs ./polys_cq
@@ -48,13 +52,6 @@ mkdir -p ./srs ./polys_cq
 - Generate SRS and CQ public parameters. This generates SRS and commitments to certain polynomials independent of the table. The following command from the project root directory generates 
 the required parameters in the subdirectory `poly_cq` for several table sizes. This step can take approximately 30 minutes.
 
-- Restart the terminal and install cargo using rustup using the following command.
-```shell
-rustup default stable
-```
-- Generate SRS and CQ public parameters. This generates SRS and commitments to certain polynomials independent of the table. This must be done once for each table size being benchmarked (given by)
-the `h_domain_size` constant. The following command from the project root directory generates the required parameters in the subdirectory `poly_cq`. Depending on the value of `h_domain_size` this 
-can take from about a minute to an hour.
 ```shell
 ~/.cargo/bin/cargo test --release --package caulk --lib ramlookup::cq::tests::test_setup -- --exact --nocapture 
 ```
@@ -145,6 +142,8 @@ approximate tables by running the test:
 Once again, one sets the parameters `h_domain_size, m_domain_size` and `k_domain_size` for obtaining different benchmarks. This test uses a base table in `polys_cq` directory corresponding to the size
 parameter `h_domain_size`. 
 
-One expects to see the following performance for the online phase for a table size of 1 million.
+We expect to see the following performance profile for the online phase for a table size of 1 million, where the x-axis 
+denotes the hamming distance of the table for which sub-vector argument is generated from the pre-processed table.
+
 
 ![img.png](img.png)
