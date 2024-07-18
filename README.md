@@ -130,3 +130,7 @@ approximate tables by running the test:
 ```
 Once again, one sets the parameters `h_domain_size, m_domain_size` and `k_domain_size` for obtaining different benchmarks. This test uses a base table in `polys_cq` directory corresponding to the size
 parameter `h_domain_size`. 
+
+One expects to see the following performance for the online phase for a table size of 1 million.
+
+![img.png](img.png)
