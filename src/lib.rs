@@ -6,6 +6,7 @@ mod single;
 mod transcript;
 pub(crate) mod util;
 mod ramlookup;
+mod plonk;
 
 pub use dft::*;
 pub use kzg::KZGCommit;
