@@ -158,6 +158,17 @@ fn compute_aggregate_poly<E: PairingEngine>(
     agg_poly
 }
 
+pub fn compute_sum_poly<E: PairingEngine>(
+    poly_vec: &[DensePolynomial<E::Fr>],
+) -> DensePolynomial<E::Fr> {
+    let mut agg_poly = DensePolynomial::<E::Fr>::zero();
+    for i in 0..poly_vec.len() {
+        agg_poly.add_assign(&poly_vec[i]);
+    }
+    agg_poly
+}
+
+
 /**
  * Pre-processed parameters for constructing/verifying lookup proofs
  *

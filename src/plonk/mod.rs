@@ -4,13 +4,14 @@ pub mod gadgets;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-use std::ops::{DivAssign, MulAssign};
+use std::ops::{Add, DivAssign, Mul, MulAssign};
 use ark_ec::PairingEngine;
-use ark_ff::{BigInteger, One, PrimeField};
+use ark_ff::{BigInteger, One, PrimeField, Zero};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial, UVPolynomial};
 use ark_poly::univariate::DensePolynomial;
 use rand::RngCore;
-use crate::{KZGCommit, PublicParameters};
+use crate::{CaulkTranscript, KZGCommit, PublicParameters};
+use crate::ramlookup::{compute_scaled_polynomial, compute_shifted_difference, compute_sum_poly};
 
 pub struct PlonkSetup<F: PrimeField> {
     pub h_domain_size: usize,                   // domain size in bits
@@ -68,6 +69,61 @@ pub fn compute_plonk_proof<E: PairingEngine>(
     plonk_setup: &PlonkSetup<E::Fr>,
     pp: &PublicParameters<E>,
 ) {
+
+    let mut transcript = CaulkTranscript::<E::Fr>::new();
+
+    // add the initial commitments to the transcript
+    transcript.append_element(b"qm_com", &instance.qm_com);
+    transcript.append_element(b"ql_com", &instance.ql_com);
+    transcript.append_element(b"qr_com", &instance.qr_com);
+    transcript.append_element(b"qo_com", &instance.qo_com);
+    transcript.append_element(b"qc_com", &instance.qc_com);
+    transcript.append_element(b"sa_com", &instance.Sa_com);
+    transcript.append_element(b"sb_com", &instance.Sb_com);
+    transcript.append_element(b"sc_com", &instance.Sc_com);
+
+    // compute and add commitments to witness polynomials to the transcript
+    let (wa_poly, wb_poly, wc_poly, wa_com, wb_com, wc_com) =
+        compute_witness_polynomials(
+            witness,
+            plonk_setup,
+            pp
+        );
+
+    transcript.append_element(b"a_com", &wa_com);
+    transcript.append_element(b"b_com", &wb_com);
+    transcript.append_element(b"c_com", &wc_com);
+
+    // get challenges beta, gamma for computing z polynomial
+    let beta = transcript.get_and_append_challenge(b"beta");
+    let gamma = transcript.get_and_append_challenge(b"gamma");
+    let (z_poly, z_com) = compute_z_polynomial(witness, beta, gamma, circuit, plonk_setup,pp);
+
+    // append commitment to z polynomial to transcript
+    transcript.append_element(b"z_com", &z_com);
+    let alpha = transcript.get_and_append_challenge(b"alpha");
+
+    // compute polynomial t(X)
+    let x_poly: DensePolynomial<E::Fr> = DensePolynomial::from_coefficients_vec(vec![E::Fr::zero(), E::Fr::one()]);
+    let one_poly: DensePolynomial<E::Fr> = DensePolynomial::from_coefficients_vec(vec![E::Fr::one()]);
+    let t_part_1  = compute_sum_poly::<E>(
+        &[
+            wa_poly.mul(&wb_poly).mul(&circuit.q_M),
+            wa_poly.mul(&circuit.q_L),
+            wb_poly.mul(&circuit.q_R),
+            wc_poly.mul(&circuit.q_O),
+            circuit.q_C.clone()
+        ]);
+    let factor_1 = &wa_poly + &(&compute_scaled_polynomial(&x_poly, beta) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
+    let factor_2 = &wb_poly + &(&compute_scaled_polynomial(&x_poly, beta*plonk_setup.k1) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
+    let factor_3 = &wc_poly + &(&compute_scaled_polynomial(&x_poly, beta*plonk_setup.k2) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
+    let t_part_2 = &(&factor_1 * &factor_2) * &(&factor_3 * &z_poly);
+    let zw_poly = compute_shifted_difference(&z_poly, plonk_setup.h_domain_size).add(z_poly.clone());
+    let factor_1 = &wa_poly + &(&compute_scaled_polynomial(&circuit.S_a, beta) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
+    let factor_2 = &wb_poly + &(&compute_scaled_polynomial(&circuit.S_b, beta) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
+    let factor_3 = &wc_poly + &(&compute_scaled_polynomial(&circuit.S_c, beta) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
+    let t_part_3 = &(factor_1 * &factor_2) * &(&factor_3 * &zw_poly);
+
 
 }
 
