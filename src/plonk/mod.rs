@@ -42,6 +42,36 @@ pub struct PlonkCircuitKeys<E: PairingEngine> {
     pub g2_tau: E::G2Affine,                    // KZG verification key
 }
 
+pub struct PlonkProof<E: PairingEngine> {
+    pub wa_com: E::G1Affine,                    // commitment to a(X) poly
+    pub wb_com: E::G1Affine,                    // commitment to b(X) poly
+    pub wc_com: E::G1Affine,                    // commitment to c(X) poly
+    pub z_com:  E::G1Affine,                    // commitment to z(X) poly
+    pub t_lo_com: E::G1Affine,                  // comm to t_lo(X)
+    pub t_mid_com: E::G1Affine,                 // comm to t_mid(X)
+    pub t_hi_com: E::G1Affine,                  // comm to t_hi(X)
+    pub wa_phi: E::Fr,                          // a(\phi)
+    pub wb_phi: E::Fr,                          // b(\phi)
+    pub wc_phi: E::Fr,                          // c(\phi)
+    pub S_a_phi: E::Fr,                         // S_a(\phi)
+    pub S_b_phi: E::Fr,                         // S_b(\phi)
+    pub z_wphi: E::Fr,                          // z(\omega \phi)
+    pub pi_phi: E::G1Affine,                    // opening proof at phi
+    pub pi_wphi: E::G1Affine,                   // opening proof at \omega \phi
+}
+
+
+pub fn compute_plonk_proof<E: PairingEngine>(
+    instance: &PlonkCircuitKeys<E>,
+    circuit: &PlonkCircuitPolynomials<E::Fr>,
+    witness: &Vec<E::Fr>,
+    plonk_setup: &PlonkSetup<E::Fr>,
+    pp: &PublicParameters<E>,
+) {
+
+}
+
+
 pub fn compute_plonk_circuit_polynomials<F: PrimeField>(
     pb: &mut Protoboard<F>,
     plonk_setup: &PlonkSetup<F>,
