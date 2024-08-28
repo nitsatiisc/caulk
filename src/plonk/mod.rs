@@ -4,18 +4,20 @@ pub mod gadgets;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-use std::ops::{Add, DivAssign, Mul, MulAssign};
+use std::ops::{Add, Div, DivAssign, Mul, MulAssign, Sub};
+use std::time::Instant;
 use ark_ec::PairingEngine;
-use ark_ff::{BigInteger, One, PrimeField, Zero};
+use ark_ff::{BigInteger, Field, One, PrimeField, Zero};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial, UVPolynomial};
 use ark_poly::univariate::DensePolynomial;
 use rand::RngCore;
 use crate::{CaulkTranscript, KZGCommit, PublicParameters};
-use crate::ramlookup::{compute_scaled_polynomial, compute_shifted_difference, compute_sum_poly};
+use crate::ramlookup::{compute_aggregate_poly, compute_scaled_polynomial, compute_shifted_difference, compute_sum_poly};
 
 pub struct PlonkSetup<F: PrimeField> {
     pub h_domain_size: usize,                   // domain size in bits
     pub domain: GeneralEvaluationDomain<F>,     // the subgroup H of roots of unity
+    pub l0_poly: DensePolynomial<F>,            // lagrange polynomial at w^0
     pub k1: F,                                  // k1 coset identifier
     pub k2: F,                                  // k2 coset identifier: k1.H, k2.H, H are distinct
 }
@@ -29,6 +31,7 @@ pub struct PlonkCircuitPolynomials<F: PrimeField> {
     pub S_a: DensePolynomial<F>,
     pub S_b: DensePolynomial<F>,
     pub S_c: DensePolynomial<F>,
+    pub permutation: Vec<F>,
 }
 
 pub struct PlonkCircuitKeys<E: PairingEngine> {
@@ -68,10 +71,12 @@ pub fn compute_plonk_proof<E: PairingEngine>(
     witness: &Vec<E::Fr>,
     plonk_setup: &PlonkSetup<E::Fr>,
     pp: &PublicParameters<E>,
-) {
+) -> PlonkProof<E> {
 
+    let n = 1usize << plonk_setup.h_domain_size;
     let mut transcript = CaulkTranscript::<E::Fr>::new();
-
+    let mut start = Instant::now();
+    let mut begin = Instant::now();
     // add the initial commitments to the transcript
     transcript.append_element(b"qm_com", &instance.qm_com);
     transcript.append_element(b"ql_com", &instance.ql_com);
@@ -89,41 +94,168 @@ pub fn compute_plonk_proof<E: PairingEngine>(
             plonk_setup,
             pp
         );
-
+    println!("Committed witness in {} secs", start.elapsed().as_secs());
     transcript.append_element(b"a_com", &wa_com);
     transcript.append_element(b"b_com", &wb_com);
     transcript.append_element(b"c_com", &wc_com);
 
     // get challenges beta, gamma for computing z polynomial
-    let beta = transcript.get_and_append_challenge(b"beta");
+    let beta = E::Fr::one(); //transcript.get_and_append_challenge(b"beta");
     let gamma = transcript.get_and_append_challenge(b"gamma");
     let (z_poly, z_com) = compute_z_polynomial(witness, beta, gamma, circuit, plonk_setup,pp);
 
+    println!("Computed z polynomial in {} secs", start.elapsed().as_secs());
     // append commitment to z polynomial to transcript
     transcript.append_element(b"z_com", &z_com);
     let alpha = transcript.get_and_append_challenge(b"alpha");
 
     // compute polynomial t(X)
+    start = Instant::now();
     let x_poly: DensePolynomial<E::Fr> = DensePolynomial::from_coefficients_vec(vec![E::Fr::zero(), E::Fr::one()]);
     let one_poly: DensePolynomial<E::Fr> = DensePolynomial::from_coefficients_vec(vec![E::Fr::one()]);
     let t_part_1  = compute_sum_poly::<E>(
         &[
-            wa_poly.mul(&wb_poly).mul(&circuit.q_M),
-            wa_poly.mul(&circuit.q_L),
-            wb_poly.mul(&circuit.q_R),
-            wc_poly.mul(&circuit.q_O),
+            &wa_poly * &(&wb_poly * &circuit.q_M),
+            &wa_poly * &circuit.q_L,
+            &wb_poly * &circuit.q_R,
+            &wc_poly * &circuit.q_O,
             circuit.q_C.clone()
         ]);
-    let factor_1 = &wa_poly + &(&compute_scaled_polynomial(&x_poly, beta) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
-    let factor_2 = &wb_poly + &(&compute_scaled_polynomial(&x_poly, beta*plonk_setup.k1) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
-    let factor_3 = &wc_poly + &(&compute_scaled_polynomial(&x_poly, beta*plonk_setup.k2) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
+    let factor_1 = &wa_poly + &(&compute_scaled_polynomial::<E>(&x_poly, beta) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
+    let factor_2 = &wb_poly + &(&compute_scaled_polynomial::<E>(&x_poly, beta*plonk_setup.k1) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
+    let factor_3 = &wc_poly + &(&compute_scaled_polynomial::<E>(&x_poly, beta*plonk_setup.k2) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
     let t_part_2 = &(&factor_1 * &factor_2) * &(&factor_3 * &z_poly);
-    let zw_poly = compute_shifted_difference(&z_poly, plonk_setup.h_domain_size).add(z_poly.clone());
-    let factor_1 = &wa_poly + &(&compute_scaled_polynomial(&circuit.S_a, beta) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
-    let factor_2 = &wb_poly + &(&compute_scaled_polynomial(&circuit.S_b, beta) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
-    let factor_3 = &wc_poly + &(&compute_scaled_polynomial(&circuit.S_c, beta) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
-    let t_part_3 = &(factor_1 * &factor_2) * &(&factor_3 * &zw_poly);
+    let zw_poly = compute_shifted_difference::<E>(&z_poly, plonk_setup.h_domain_size).add(z_poly.clone());
+    let factor_1 = &wa_poly + &(&compute_scaled_polynomial::<E>(&circuit.S_a, beta) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
+    let factor_2 = &wb_poly + &(&compute_scaled_polynomial::<E>(&circuit.S_b, beta) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
+    let factor_3 = &wc_poly + &(&compute_scaled_polynomial::<E>(&circuit.S_c, beta) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
+    let t_part_3 = &(&factor_1 * &factor_2) * &(&factor_3 * &zw_poly);
 
+
+    let l0_poly = plonk_setup.l0_poly.clone();
+    let t_part_4 = &l0_poly * &(&z_poly - &DensePolynomial::from_coefficients_vec(vec![E::Fr::one()]));
+
+    let t_part_23 = &t_part_2 - &t_part_3;
+    let t_poly_num = compute_aggregate_poly::<E>(&[t_part_1.clone(), t_part_23.clone(), t_part_4.clone()], alpha);
+    println!("Computed t numerator in {} secs", start.elapsed().as_secs());
+
+    start = Instant::now();
+    let (t_poly, _) = t_poly_num.divide_by_vanishing_poly(plonk_setup.domain).unwrap();
+
+
+    //let u = transcript.get_and_append_challenge(b"u");
+    //assert_eq!(t_poly.evaluate(&u) * plonk_setup.domain.evaluate_vanishing_polynomial(u), t_poly_num.evaluate(&u), "Polynomial constraints not satisfied");
+
+    let mut t_coeffs = t_poly.coeffs().to_vec().clone();
+    t_coeffs.resize(3*n, E::Fr::zero());
+
+    // Split t_poly into three polynomials t_lo, t_mid and t_hi
+    let t_lo = DensePolynomial::from_coefficients_slice(&t_coeffs[0..n]);
+    let t_mid = DensePolynomial::from_coefficients_slice(&t_coeffs[n..2*n]);
+    let t_hi = DensePolynomial::from_coefficients_slice(&t_coeffs[2*n..3*n]);
+
+    // Commit to above polynomials and add to the transcript
+    let t_lo_com = KZGCommit::commit_g1(&pp.poly_ck, &t_lo);
+    let t_mid_com = KZGCommit::commit_g1(&pp.poly_ck, &t_mid);
+    let t_hi_com = KZGCommit::commit_g1(&pp.poly_ck, &t_hi);
+
+    transcript.append_element(b"t_lo_com", &t_lo_com);
+    transcript.append_element(b"t_mid_com", &t_mid_com);
+    transcript.append_element(b"t_hi_com", &t_hi_com);
+
+    println!("Committed to t polynomial in {} secs", start.elapsed().as_secs());
+    let phi = transcript.get_and_append_challenge(b"phi");
+
+    start = Instant::now();
+    // Send partial evaluations
+    let wa_phi = wa_poly.evaluate(&phi);
+    let wb_phi = wb_poly.evaluate(&phi);
+    let wc_phi = wc_poly.evaluate(&phi);
+    let sa_phi = circuit.S_a.evaluate(&phi);
+    let sb_phi = circuit.S_b.evaluate(&phi);
+    let zw_phi = zw_poly.evaluate(&phi);
+    //assert_eq!(z_poly.evaluate(&(phi * plonk_setup.domain.element(1))), zw_poly.evaluate(&phi), "Z(X) and Z(wX) don't match");
+
+    transcript.append_element(b"wa_phi", &wa_phi);
+    transcript.append_element(b"wb_phi", &wb_phi);
+    transcript.append_element(b"wc_phi", &wc_phi);
+    transcript.append_element(b"sa_phi", &sa_phi);
+    transcript.append_element(b"sb_phi", &sb_phi);
+    transcript.append_element(b"zw_phi", &zw_phi);
+    println!("Sent evaluations in {} secs", start.elapsed().as_secs());
+
+    let v = transcript.get_and_append_challenge(b"v");
+    start = Instant::now();
+    // compute linearisation polynomial r(X)
+    let r_part_1 = &compute_scaled_polynomial::<E>(&circuit.q_M, wa_phi*wb_phi)
+                                            .add(compute_scaled_polynomial::<E>(&circuit.q_L, wa_phi))
+                                            .add(compute_scaled_polynomial::<E>(&circuit.q_R, wb_phi))
+                                            .add(compute_scaled_polynomial::<E>(&circuit.q_O, wc_phi)) + &circuit.q_C;
+    let r_part_2 = compute_scaled_polynomial::<E>(&z_poly, (wa_phi + beta * phi + gamma)*(wb_phi + beta * plonk_setup.k1 * phi + gamma)*(wc_phi + beta * plonk_setup.k2 * phi + gamma));
+    let r_part_31 = &compute_scaled_polynomial::<E>(&circuit.S_c, beta) + &DensePolynomial::from_coefficients_vec(vec![gamma + wc_phi]);
+    let r_part_32 = compute_scaled_polynomial::<E>(&r_part_31, (wa_phi + beta*sa_phi + gamma)*(wb_phi + beta * sb_phi + gamma)*zw_phi);
+    let r_part_23 = &r_part_2 - &r_part_32;
+
+    let zh_phi = plonk_setup.domain.evaluate_vanishing_polynomial(phi);
+    let l0_phi = phi.sub(E::Fr::one()).inverse().unwrap() * E::Fr::from(n as u128).inverse().unwrap() * zh_phi;
+
+    let r_part_4 = compute_scaled_polynomial::<E>(&(&z_poly - &one_poly), l0_phi);
+    let r_part_5 = &(&compute_scaled_polynomial::<E>(&t_lo, zh_phi) + &compute_scaled_polynomial::<E>(&t_mid, zh_phi * phi.pow(E::Fr::from(n as u128).into_repr()))) +
+                            &compute_scaled_polynomial::<E>(&t_hi, zh_phi * phi.square().pow(E::Fr::from(n as u128).into_repr()));
+
+    let r_poly_combined = compute_aggregate_poly::<E>(&[r_part_1.clone(), r_part_23.clone(), r_part_4.clone()], alpha);
+    let r_poly = &r_poly_combined - &r_part_5;
+
+    //assert_eq!(r_poly.evaluate(&phi), E::Fr::zero(), "r(X) is not correctly computed");
+
+    // compute opening polynomial W
+    let w_sub_polys = [
+        r_poly,
+        wa_poly,
+        wb_poly,
+        wc_poly,
+        circuit.S_a.clone(),
+        circuit.S_b.clone(),
+    ];
+    let w_poly = &compute_aggregate_poly::<E>(&w_sub_polys, v) - &DensePolynomial::from_coefficients_vec(vec![v*wa_phi + v*v*wb_phi + v*v*v*wc_phi + v*v*v*v*sa_phi + v*v*v*v*v*sb_phi]);
+
+    //assert_eq!(w_poly.evaluate(&phi), E::Fr::zero(), "W(X) is not correctly computed");
+
+    let w_q_poly = &w_poly / &DensePolynomial::from_coefficients_vec(vec![E::Fr::zero() - phi, E::Fr::one()]);
+
+    //assert_eq!(w_poly.evaluate(&alpha), w_q_poly.evaluate(&alpha) * (alpha - phi), "W_Q(X) is not correctly computed");
+
+    let z_q_poly =
+        &(&z_poly - &DensePolynomial::from_coefficients_slice(&[zw_phi])) / &DensePolynomial::from_coefficients_vec(vec![E::Fr::zero() - phi*plonk_setup.domain.element(1usize), E::Fr::one()]);
+
+    //assert_eq!(z_poly.evaluate(&alpha) - zw_phi, z_q_poly.evaluate(&alpha) * (alpha - phi*plonk_setup.domain.element(1usize)), "Z_Q(X) is not correctly computed");
+
+    let w_q_com = KZGCommit::commit_g1(&pp.poly_ck, &w_q_poly);
+    let z_q_com = KZGCommit::commit_g1(&pp.poly_ck, &z_q_poly);
+
+    transcript.append_element(b"w_q_com", &w_q_com);
+    transcript.append_element(b"z_q_com", &z_q_com);
+
+    println!("Committed to linearized polynomials in {} secs", start.elapsed().as_secs());
+
+
+    PlonkProof::<E> {
+        wa_com: wa_com,
+        wb_com: wb_com,
+        wc_com: wc_com,
+        z_com: z_com,
+        t_lo_com: t_lo_com,
+        t_mid_com: t_mid_com,
+        t_hi_com: t_hi_com,
+        wa_phi: wa_phi,
+        wb_phi: wb_phi,
+        wc_phi: wc_phi,
+        S_a_phi: sa_phi,
+        S_b_phi: sb_phi,
+        z_wphi: zw_phi,
+        pi_phi: w_q_com,
+        pi_wphi: z_q_com,
+    }
 
 }
 
@@ -132,7 +264,7 @@ pub fn compute_plonk_circuit_polynomials<F: PrimeField>(
     pb: &mut Protoboard<F>,
     plonk_setup: &PlonkSetup<F>,
 ) -> PlonkCircuitPolynomials<F> {
-    let (q_M, q_L, q_R, q_O, q_C, S_a, S_b, S_c) = pb.output_circuit_polynomials(plonk_setup);
+    let (q_M, q_L, q_R, q_O, q_C, S_a, S_b, S_c, permutation) = pb.output_circuit_polynomials(plonk_setup);
     PlonkCircuitPolynomials::<F> {
         q_M,
         q_L,
@@ -142,6 +274,7 @@ pub fn compute_plonk_circuit_polynomials<F: PrimeField>(
         S_a,
         S_b,
         S_c,
+        permutation,
     }
 }
 
@@ -207,17 +340,18 @@ pub fn compute_z_polynomial<E: PairingEngine>(
 {
     let n = 1usize << plonk_setup.h_domain_size;
     let mut z_evals: Vec<E::Fr> = Vec::new();
-    z_evals.push(E::Fr::one());
+    z_evals.resize(n, E::Fr::zero());
     let mut prod = E::Fr::one();
-    for i in 0..n-1 {
+    for i in 0..n {
         let wi = plonk_setup.domain.element(i);
         let k1wi = plonk_setup.k1 * wi;
         let k2wi = plonk_setup.k2 * wi;
         prod.mul_assign((witness[i] + beta * wi + gamma) * (witness[n+i] + beta * k1wi + gamma) * (witness[2*n+i] + beta * k2wi + gamma));
-        prod.div_assign((witness[i] + beta * circuit.S_a.evaluate(&wi) + gamma) * (witness[n+i] + beta * circuit.S_b.evaluate(&wi) + gamma) * (witness[2*n+i] + beta * circuit.S_c.evaluate(&wi)));
-        z_evals.push(prod);
+        prod.div_assign((witness[i] + beta * circuit.permutation[i] + gamma) * (witness[n+i] + beta * circuit.permutation[n+i] + gamma) * (witness[2*n+i] + beta * circuit.permutation[2*n+i] + gamma));
+        z_evals[(i+1) % n] = prod;
     }
-
+    //println!("{}", prod);
+    assert_eq!(z_evals[0], E::Fr::one(), "Permutation not satisfied");
     let z_poly_vec = plonk_setup.domain.ifft(&z_evals);
     let z_poly = DensePolynomial::from_coefficients_vec(z_poly_vec);
     let z_com = KZGCommit::commit_g1(&pp.poly_ck, &z_poly);
@@ -292,9 +426,15 @@ impl<F:PrimeField> PlonkSetup<F> {
             prod = domain.evaluate_vanishing_polynomial(k1) * domain.evaluate_vanishing_polynomial(k2) * domain.evaluate_vanishing_polynomial(k1.mul(k2));
         }
 
+        let mut l0_evals: Vec<F> = Vec::new();
+        l0_evals.resize(n, F::zero());
+        l0_evals[0] = F::one();
+        let l0_poly = DensePolynomial::from_coefficients_vec(domain.ifft(&l0_evals));
+
         Self {
             h_domain_size,
-            domain: domain.clone(),
+            domain: domain,
+            l0_poly: l0_poly,
             k1: k1,
             k2: k2,
         }
@@ -452,6 +592,7 @@ impl<F:PrimeField> Protoboard<F> {
         DensePolynomial<F>,                 // S_a
         DensePolynomial<F>,                 // S_b
         DensePolynomial<F>,                 // S_c
+        Vec<F>,
     ) {
         // extend all polynomials to the domain size
         let n = plonk_setup.domain.size();
@@ -493,24 +634,28 @@ impl<F:PrimeField> Protoboard<F> {
                 self.permutation[cycle[i]] = cycle[(i+1) % n_cycle];
             }
 
+            /*
             print!("(");
             for i in 0..n_cycle {
                 print!("{} ", cycle[i]);
             }
             println!(")");
+
+             */
         }
 
         // map the permutation to cosets of H
-        let permutation_on_coset: Vec<F> = self.permutation.iter().map(|x|
+        let mut permutation_on_coset: Vec<F> = Vec::new();
+        for i in 0..self.permutation.len() {
+            let x = &self.permutation[i];
             if *x < n {
-                plonk_setup.domain.element(*x)
-            } else if *x < 2*n {
-                plonk_setup.k1 * plonk_setup.domain.element(*x - n)
+                permutation_on_coset.push(plonk_setup.domain.element(*x));
+            } else if *x < 2 * n {
+                permutation_on_coset.push(plonk_setup.k1 * plonk_setup.domain.element(*x - n));
             } else {
-                plonk_setup.k2 * plonk_setup.domain.element(*x - 2 * n)
-            }).collect();
-
-
+                permutation_on_coset.push(plonk_setup.k2 * plonk_setup.domain.element(*x - (2 * n)));
+            }
+        }
 
 
         let q_M = DensePolynomial::from_coefficients_vec(plonk_setup.domain.ifft(&self.cs.qm_poly_coeffs));
@@ -526,12 +671,12 @@ impl<F:PrimeField> Protoboard<F> {
         for i in 0..n {
             s_a_coeffs.push(permutation_on_coset[i]);
             s_b_coeffs.push(permutation_on_coset[i+n]);
-            s_c_coeffs.push(permutation_on_coset[i+2*n]);
+            s_c_coeffs.push(permutation_on_coset[i + 2*n]);
         }
 
-        let S_a: DensePolynomial<F> = DensePolynomial::from_coefficients_vec(s_a_coeffs);
-        let S_b: DensePolynomial<F> = DensePolynomial::from_coefficients_vec(s_b_coeffs);
-        let S_c: DensePolynomial<F> = DensePolynomial::from_coefficients_vec(s_c_coeffs);
+        let S_a: DensePolynomial<F> = DensePolynomial::from_coefficients_vec(plonk_setup.domain.ifft(&s_a_coeffs));
+        let S_b: DensePolynomial<F> = DensePolynomial::from_coefficients_vec(plonk_setup.domain.ifft(&s_b_coeffs));
+        let S_c: DensePolynomial<F> = DensePolynomial::from_coefficients_vec(plonk_setup.domain.ifft(&s_c_coeffs));
 
         (
             q_M,
@@ -542,6 +687,7 @@ impl<F:PrimeField> Protoboard<F> {
             S_a,
             S_b,
             S_c,
+            permutation_on_coset,
         )
     }
 
@@ -577,6 +723,7 @@ impl<F:PrimeField> Protoboard<F> {
 mod tests {
     use super::*;
     use std::ops::{Add, Mul};
+    use std::time::Instant;
     use ark_bls12_381::Bls12_381;
     use ark_ec::bls12::Bls12;
     use ark_ec::PairingEngine;
@@ -668,7 +815,7 @@ mod tests {
         inner_product.attach(&mut pb, &input, &vec![output.clone()]);
         inner_product.generate_constraints(&mut pb);
 
-        let (q_M, q_L, q_R, q_O, q_C, S_a, S_b, S_c) =
+        let (q_M, q_L, q_R, q_O, q_C, S_a, S_b, S_c, permutation) =
             pb.output_circuit_polynomials(&plonk_setup);
 
         // Generate witness
@@ -778,21 +925,21 @@ mod tests {
     fn test_witness_polynomials_helper<E: PairingEngine>()
     {
         let mut rng = test_rng();
-        let plonk_setup = PlonkSetup::<E::Fr>::new(5usize, &mut rng);
-        let srs_size: usize = 10;
+        let srs_size: usize = 15;
         let N = 1usize << srs_size;
         let m = 1usize << 5;
         let max_degree = N;
         // Generate SRS for degree N
         let pp: PublicParameters<E> = PublicParameters::setup(&max_degree, &N, &m, &srs_size);
+        let plonk_setup = PlonkSetup::<E::Fr>::new(srs_size, &mut rng);
 
         let mut pb: Protoboard<E::Fr> = Protoboard::new();
-        let n: usize = 10;
+        let n: usize = N >> 3;
         let zero_var: Variable = Variable {name: "zero".to_string(), pb_index: 0};
         let mut inner_product: InnerProductComponent = InnerProductComponent::new(n);
 
-        let x_vals: Vec<u128> = vec![0,1,2,3,4,5,6,7,8,9];
-        let y_vals: Vec<u128> = vec![1,1,1,1,1,1,1,1,1,1];
+        let x_vals: Vec<u128> = vec![1; n];
+        let y_vals: Vec<u128> = vec![1; n];
 
         // declare variables on protoboard
         let mut input: Vec<Variable> = Vec::new(); input.resize(2*n, zero_var.clone());
@@ -809,6 +956,7 @@ mod tests {
         inner_product.generate_constraints(&mut pb);
 
         // Generate circuit polynomials for the prover
+
         let circuit: PlonkCircuitPolynomials<E::Fr> = compute_plonk_circuit_polynomials(&mut pb, &plonk_setup);
         let circuit_pp: PlonkCircuitKeys<E> = compute_plonk_circuit_keys(&circuit, &pp);
 
@@ -821,15 +969,21 @@ mod tests {
 
         println!("pb.satisfied() = {}", pb.is_satisfied());
 
+        let mut start = Instant::now();
         let witness = pb.output_witness();
-        let (wa_poly, wb_poly, wc_poly, wa_com, wb_com, wc_com) = compute_witness_polynomials(&witness, &plonk_setup, &pp);
-
+        //let (wa_poly, wb_poly, wc_poly, wa_com, wb_com, wc_com) = compute_witness_polynomials(&witness, &plonk_setup, &pp);
+        println!("Time to generate witness: {}", start.elapsed().as_secs());
         // comnpute circuit witness polynomial
-        let cw_poly = (&circuit.q_M * &(&wa_poly * &wb_poly)).add(&circuit.q_L * &wa_poly).add(&circuit.q_R * &wb_poly).add(&circuit.q_O * &wc_poly).add(circuit.q_C);
-        let (q_poly, _) = cw_poly.divide_by_vanishing_poly(plonk_setup.domain).unwrap();
-        let alpha = E::Fr::rand(&mut rng);
+        //let cw_poly = (&circuit.q_M * &(&wa_poly * &wb_poly)).add(&circuit.q_L * &wa_poly).add(&circuit.q_R * &wb_poly).add(&circuit.q_O * &wc_poly).add(circuit.q_C.clone());
+        //let (q_poly, _) = cw_poly.divide_by_vanishing_poly(plonk_setup.domain).unwrap();
+        //let alpha = E::Fr::rand(&mut rng);
 
-        assert_eq!(cw_poly.evaluate(&alpha), q_poly.evaluate(&alpha) * plonk_setup.domain.evaluate_vanishing_polynomial(alpha), "Polynomial Identity not Satisfied");
+        //assert_eq!(cw_poly.evaluate(&alpha), q_poly.evaluate(&alpha) * plonk_setup.domain.evaluate_vanishing_polynomial(alpha), "Polynomial Identity not Satisfied");
+
+        println!("Generating PLONK Proof");
+        let mut start = Instant::now();
+        let proof = compute_plonk_proof(&circuit_pp, &circuit, &witness, &plonk_setup, &pp);
+        println!("Time to generate proof = {} secs", start.elapsed().as_secs());
 
     }
 

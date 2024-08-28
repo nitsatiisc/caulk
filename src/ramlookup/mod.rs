@@ -144,7 +144,7 @@ pub fn compute_q1_and_q2_poly<E: PairingEngine>(
 
 // Given polynomial vector (p_0(X),...,p_{k-1}(X)) and scalar r
 // outputs the polynomial \sum_{i=0}^{k-1} r^i p_i(X)
-fn compute_aggregate_poly<E: PairingEngine>(
+pub fn compute_aggregate_poly<E: PairingEngine>(
     poly_vec: &[DensePolynomial<E::Fr>],
     r: <E as PairingEngine>::Fr
 ) -> DensePolynomial<E::Fr> {
