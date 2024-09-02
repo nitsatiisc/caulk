@@ -28,7 +28,7 @@ pub struct LagrangeFoldingArgument<F: PrimeField> {
 }
 
 pub struct LagrangianFoldingProof<F: PrimeField> {
-    pub round_polynomials: Vec<DensePolynomial<F>>,
+    pub round_polynomials: Vec<Vec<F>>,
 }
 
 pub fn split_vec<T: Clone>(v: &Vec<T>) -> (Vec<T>, Vec<T>)
@@ -242,7 +242,15 @@ impl<E: PairingEngine> PackedPolynomial<E> {
         let poly_monomial = DensePolynomial::from_coefficients_vec(poly_coeffs_monomial);
         assert_eq!(poly_monomial.evaluate(&x), lf[0], "Folded inner product does not match");
 
+
         // lf_proof = SumCheckArgument(rounds = 2*l,
+        let seed = transcript.get_and_append_challenge(b"seed");
+        let lf_arg: LagrangeFoldingArgument<E::Fr> = LagrangeFoldingArgument::new(self.k_domain_size, &ch_vec, x, seed);
+        let lf_proof = lf_arg.proof();
+
+        // check that g_0(0) + g_0(1) = n*lf[0]
+        assert_eq!(lf_proof.round_polynomials[0][0] + lf_proof.round_polynomials[0][1], E::Fr::from(n as u128)*lf[0], "Sum-check incorrect");
+
 
         PartialOpenProof::<E> {
             uni_com: uni_com,
@@ -298,7 +306,7 @@ impl<F: PrimeField> LagrangeFoldingArgument<F> {
         // Populate g_i tables: Note g_i(b) = phi^{2^i}^b - 1 where phi = w^{-1}
         for i in 0..self.k_domain_size {
             for b in 0..n {
-                A_g[i][b] = self.domain.element((n-1) - (b << i % n)) - F::one();
+                A_g[i][b] = self.domain.element((n - ((b << i) % n)) % n) - F::one();
             }
         }
 
@@ -311,15 +319,118 @@ impl<F: PrimeField> LagrangeFoldingArgument<F> {
         }
 
         // Start rounds by sending polynomials
+        let mut round_polynomials: Vec<Vec<F>> = Vec::new();
         let mut transcript = CaulkTranscript::<F>::new();
         transcript.append_element(b"seed", &self.seed);
 
         let two_ff = F::from(2 as u128);
         // Prover starts by sending the first polynomial g_0(X_0) by sending values at 0,1,2
+        let mut r_vec: Vec<F> = Vec::new();
+
+        while r_vec.len() < self.k_domain_size {
+            let mut out_prod = F::one();
+            let k = r_vec.len();
+            // outermost product \prod_{i=0}^{k-1} (1 + r_i(z^{2^i}-1))
+            for i in 0..k {
+                out_prod *= (F::one() + r_vec[i]*(powers_of_z[i] - F::one()));
+            }
+
+            let mut sum0 = F::zero();
+            let mut sum1 = F::zero();
+            let mut sum2 = F::zero();
+
+            for y in 0..n {
+                let mut prod_y = A_f[y];
+                // assimilate the parts independent of different values of x_k, which we set as 0,1,2
+                for i in 0..k {
+                    prod_y *= (F::one() + r_vec[i]*A_g[i][y]);
+                }
+
+                for i in (k+1)..self.k_domain_size {
+                    prod_y *= (F::one() + powers_of_z[i] + powers_of_z[i]*A_g[i][y]);
+                }
+
+                sum0 = sum0 + prod_y;
+                sum1 = sum1 + (F::one() + A_g[k][y])*prod_y;
+                sum2 = sum2 + (F::one() + A_g[k][y] + A_g[k][y])*prod_y;
+            }
+
+            let out_prod_1 = powers_of_z[k] * out_prod;
+            let out_prod_2 = (powers_of_z[k] + powers_of_z[k] - F::one())*out_prod;
+
+            sum1 = sum1 * out_prod_1;
+            sum2 = sum2 * out_prod_2;
+
+            transcript.append_element(b"sum0", &sum0);
+            transcript.append_element(b"sum1", &sum1);
+            transcript.append_element(b"sum2", &sum2);
+            let r = transcript.get_and_append_challenge(b"ch_r");
+
+            round_polynomials.push(vec![sum0, sum1, sum2]);
+            r_vec.push(r);
+        }
+
+        // Next we will start setting Y variables to random values. We now evaluate the polynomial
+        // at 0,1,2,..,k_domain_size
+
+        // Compute the outer factor f_z(r)
+        let mut f_z_r = F::one();
+        for i in 0..self.k_domain_size {
+            f_z_r *= (F::one() + r_vec[i]*(powers_of_z[i] - F::one()));
+        }
+
+        let mut r_dash_vec: Vec<F> = Vec::new();
+        while r_dash_vec.len() < self.k_domain_size {
+            let k = r_dash_vec.len();
+            let tsize = A_f.len();
+            // For any k=0,..,l-1 it holds that:
+            // A_f[i] contains f(r_0,..,r_{k-1},bin(i))
+            // g_s[i] contains g_s(r_0,..,r_{k-1},bin(i))
+            let mut vals: Vec<F> = Vec::new();
+            vals.resize(1+self.k_domain_size, F::zero());
+            for x in 0..=self.k_domain_size {
+                let ff_x = F::from(x as u128);
+                let mut sum_over_y = F::zero();
+                for y in 0..tsize/2 {
+                    let mut prod_y = F::one();
+                    prod_y *= ((F::one() - ff_x) * A_f[y] + ff_x * A_f[y + tsize/2]);
+                    for i in 0..self.k_domain_size {
+                        prod_y *= ((F::one() - ff_x)*A_g[i][y] + ff_x * A_g[i][y + tsize/2]);
+                    }
+                    sum_over_y += prod_y;
+                }
+                vals[x] = f_z_r * sum_over_y;
+            }
+
+            round_polynomials.push(vals.clone());
+            // add the values to the transcript
+            for i in 0..vals.len() {
+                transcript.append_element(b"vals", &vals[i]);
+            }
+
+            let r = transcript.get_and_append_challenge(b"ch_r");
+            r_dash_vec.push(r);
+
+            // Re-compute the compressed arrays
+            for i in 0..tsize/2 {
+                A_f[i] = (F::one() - r)*A_f[i] + r*A_f[i+tsize/2];
+                for j in 0..self.k_domain_size {
+                    A_g[j][i] = (F::one() - r)*A_g[j][i] + r*A_g[j][i+tsize/2];
+                }
+            }
+
+            // Resize all the arrays
+            A_f.resize(tsize/2, F::zero());
+            for j in 0..self.k_domain_size {
+                A_g[j].resize(tsize/2, F::zero());
+            }
+
+        }
+
 
 
         LagrangianFoldingProof::<F> {
-            round_polynomials: vec![],
+            round_polynomials: round_polynomials
         }
     }
 
