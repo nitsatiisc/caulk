@@ -9,6 +9,7 @@ use ark_msm::msm::VariableBaseMSM;
 use ark_poly::{EvaluationDomain, Evaluations, GeneralEvaluationDomain, Polynomial, UVPolynomial};
 use ark_poly::univariate::DensePolynomial;
 use ark_std::{cfg_into_iter, UniformRand};
+use rayon::prelude::*;
 use crate::{CaulkTranscript, compute_vanishing_poly, fast_poly_evaluate, fast_poly_interpolate, field_dft, group_dft, KZGCommit, PublicParameters};
 use rand::{Rng, RngCore};
 use crate::multi::TableInput;

@@ -34,6 +34,7 @@ permutation = "0.4.1"
 colored = "2.0.4"
 
 [features]
+default=["parallel"]
 asm = [ "ark-ff/asm" ]
 parallel = [ 
     "rayon",
@@ -44,4 +45,5 @@ parallel = [
 print-trace = [
     "ark-std/print-trace"
 ]
+rayon = ["dep:rayon"]
 
