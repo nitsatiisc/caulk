@@ -306,7 +306,8 @@ impl<F: PrimeField> LagrangeFoldingArgument<F> {
         // Populate g_i tables: Note g_i(b) = phi^{2^i}^b - 1 where phi = w^{-1}
         for i in 0..self.k_domain_size {
             for b in 0..n {
-                A_g[i][b] = self.domain.element((n - ((b << i) % n)) % n) - F::one();
+                let p = (b << i) % n;
+                A_g[i][b] = self.domain.element((n - p) % n) - F::one();
             }
         }
 
@@ -322,9 +323,9 @@ impl<F: PrimeField> LagrangeFoldingArgument<F> {
         let mut round_polynomials: Vec<Vec<F>> = Vec::new();
         let mut transcript = CaulkTranscript::<F>::new();
         transcript.append_element(b"seed", &self.seed);
-
         let two_ff = F::from(2 as u128);
-        // Prover starts by sending the first polynomial g_0(X_0) by sending values at 0,1,2
+
+        // Vector of random elements bound to X variables
         let mut r_vec: Vec<F> = Vec::new();
 
         while r_vec.len() < self.k_domain_size {
@@ -342,7 +343,7 @@ impl<F: PrimeField> LagrangeFoldingArgument<F> {
             for y in 0..n {
                 let mut prod_y = A_f[y];
                 // assimilate the parts independent of different values of x_k, which we set as 0,1,2
-                for i in 0..k {
+                for i in 0.. k {
                     prod_y *= (F::one() + r_vec[i]*A_g[i][y]);
                 }
 
@@ -352,21 +353,32 @@ impl<F: PrimeField> LagrangeFoldingArgument<F> {
 
                 sum0 = sum0 + prod_y;
                 sum1 = sum1 + (F::one() + A_g[k][y])*prod_y;
-                sum2 = sum2 + (F::one() + A_g[k][y] + A_g[k][y])*prod_y;
+                sum2 = sum2 + (A_g[k][y] + A_g[k][y] + F::one())*prod_y;
             }
 
             let out_prod_1 = powers_of_z[k] * out_prod;
             let out_prod_2 = (powers_of_z[k] + powers_of_z[k] - F::one())*out_prod;
 
+            sum0 = sum0 * out_prod;
             sum1 = sum1 * out_prod_1;
             sum2 = sum2 * out_prod_2;
+
 
             transcript.append_element(b"sum0", &sum0);
             transcript.append_element(b"sum1", &sum1);
             transcript.append_element(b"sum2", &sum2);
-            let r = transcript.get_and_append_challenge(b"ch_r");
 
+            // testing code
+            /*
+            if (round_polynomials.len() > 0) {
+                let r = *r_vec.last().unwrap();
+                let prev_poly = round_polynomials.last().unwrap();
+                let prev_val_r = (r - F::one()) * (r - two_ff) * prev_poly[0] - two_ff * r * (r - two_ff) * prev_poly[1] + r * (r - F::one()) * prev_poly[2];
+                assert_eq!(prev_val_r, sum0 + sum1 + sum0 + sum1, "Round check failed at k = {}", k);
+            }
+            */
             round_polynomials.push(vec![sum0, sum1, sum2]);
+            let r = transcript.get_and_append_challenge(b"ch_r");
             r_vec.push(r);
         }
 
@@ -379,32 +391,36 @@ impl<F: PrimeField> LagrangeFoldingArgument<F> {
             f_z_r *= (F::one() + r_vec[i]*(powers_of_z[i] - F::one()));
         }
 
+        // Vector of random elements bound to Y variables
         let mut r_dash_vec: Vec<F> = Vec::new();
+        let mut tsize = n;
         while r_dash_vec.len() < self.k_domain_size {
-            let k = r_dash_vec.len();
-            let tsize = A_f.len();
             // For any k=0,..,l-1 it holds that:
             // A_f[i] contains f(r_0,..,r_{k-1},bin(i))
             // g_s[i] contains g_s(r_0,..,r_{k-1},bin(i))
             let mut vals: Vec<F> = Vec::new();
-            vals.resize(1+self.k_domain_size, F::zero());
-            for x in 0..=self.k_domain_size {
+            vals.resize(2+self.k_domain_size, F::zero());
+            for x in 0..=(self.k_domain_size+1) {
                 let ff_x = F::from(x as u128);
                 let mut sum_over_y = F::zero();
                 for y in 0..tsize/2 {
                     let mut prod_y = F::one();
-                    prod_y *= ((F::one() - ff_x) * A_f[y] + ff_x * A_f[y + tsize/2]);
+                    prod_y *= ((F::one() - ff_x) * A_f[2*y] + ff_x * A_f[2*y + 1]);
+
                     for i in 0..self.k_domain_size {
-                        prod_y *= ((F::one() - ff_x)*A_g[i][y] + ff_x * A_g[i][y + tsize/2]);
+                        let g_iy = (F::one() - ff_x)*A_g[i][2*y] + ff_x * A_g[i][2*y + 1];
+                        prod_y *= (F::one() + r_vec[i]*g_iy);
                     }
+
                     sum_over_y += prod_y;
                 }
-                vals[x] = f_z_r * sum_over_y;
+
+                vals[x] = f_z_r*sum_over_y;
             }
 
             round_polynomials.push(vals.clone());
             // add the values to the transcript
-            for i in 0..vals.len() {
+            for i in 0..1 {
                 transcript.append_element(b"vals", &vals[i]);
             }
 
@@ -413,22 +429,99 @@ impl<F: PrimeField> LagrangeFoldingArgument<F> {
 
             // Re-compute the compressed arrays
             for i in 0..tsize/2 {
-                A_f[i] = (F::one() - r)*A_f[i] + r*A_f[i+tsize/2];
-                for j in 0..self.k_domain_size {
-                    A_g[j][i] = (F::one() - r)*A_g[j][i] + r*A_g[j][i+tsize/2];
+                A_f[i] = (F::one() - r)*A_f[2*i] + r*A_f[2*i+1];
+                for j in 0..self.k_domain_size  {
+                    A_g[j][i] = (F::one() - r)*A_g[j][2*i] + r*A_g[j][2*i+1];
                 }
             }
 
-            // Resize all the arrays
-            A_f.resize(tsize/2, F::zero());
-            for j in 0..self.k_domain_size {
-                A_g[j].resize(tsize/2, F::zero());
-            }
-
+            tsize = tsize/2;
         }
 
 
+        // check round equalities
+        /*
+        for t in 1..self.k_domain_size {
+            let poly_prev = round_polynomials[self.k_domain_size + t -1].clone();
+            let poly_curr = round_polynomials[self.k_domain_size + t].clone();
+            let r = r_dash_vec[t-1];
 
+            // Calculate the value of the final polynomial
+            let mut lagrange_multipliers: Vec<F> = Vec::new();
+            // evaluate lagrange polynomials at r
+            for i in 0..=(self.k_domain_size+1) {
+                let mut numerator = F::one();
+                let mut denom = F::one();
+                for j in 0..=(self.k_domain_size+1) {
+                    if j != i {
+                        numerator *= (r - F::from(j as u128));
+                        denom *= (F::from(i as u128) - F::from(j as u128));
+                    }
+                }
+                lagrange_multipliers.push(numerator.mul(denom.inverse().unwrap()));
+            }
+
+            let mut val = F::zero();
+            for i in 0..=(self.k_domain_size+1) {
+                val += (lagrange_multipliers[i] * poly_prev[i]);
+            }
+
+            assert_eq!(val, poly_curr[0] + poly_curr[1], "Equality does not hold for t = {}", t);
+
+        }
+
+        // check for round 0 of Y variables
+        let prev_poly = round_polynomials[self.k_domain_size-1].clone();
+        let curr_poly = round_polynomials[self.k_domain_size].clone();
+        let r = *r_vec.last().unwrap();
+        let prev_val_r = (r - F::one()) * (r - two_ff) * prev_poly[0] - two_ff * r * (r - two_ff) * prev_poly[1] + r * (r - F::one()) * prev_poly[2];
+        assert_eq!(prev_val_r, curr_poly[0] + curr_poly[0] + curr_poly[1] + curr_poly[1], "Round check failed at switch-over");
+
+
+        // Sanity check. The last polynomial g_{2l-1}(r_{2l-1}) = F(r,r')
+        let mut prod = F::one();
+        for k in 0..self.k_domain_size {
+            let mut prod_k = F::one();
+            for t in 0..self.k_domain_size {
+                let p = (1usize << (k+t)) % n;
+                let phi_kt = self.domain.element( (n - p) % n);
+                prod_k *= (r_dash_vec[t]*phi_kt + F::one() - r_dash_vec[t]);
+            }
+            prod *= (r_vec[k]*prod_k + F::one() - r_vec[k]);
+        }
+
+        // Multiply f_z
+        for i in 0..self.k_domain_size {
+            prod *= (r_vec[i]*powers_of_z[i] + F::one() - r_vec[i]);
+            prod *= (r_dash_vec[i]*self.ch_vec[self.k_domain_size-1-i] + F::one() - r_dash_vec[i]);           // (1 + r_i'(c_{l-1-i}-1))
+        }
+
+
+        // Calculate the value of the final polynomial
+        let mut lagrange_multipliers: Vec<F> = Vec::new();
+        let r = r_dash_vec[self.k_domain_size - 1];
+        // evaluate lagrange polynomials at r
+        for i in 0..=(self.k_domain_size+1) {
+            let mut numerator = F::one();
+            let mut denom = F::one();
+            for j in 0..=(self.k_domain_size+1) {
+                if j != i {
+                    numerator *= (r - F::from(j as u128));
+                    denom *= (F::from(i as u128) - F::from(j as u128));
+                }
+            }
+            lagrange_multipliers.push(numerator.mul(denom.inverse().unwrap()));
+        }
+
+        let polynomial = round_polynomials[round_polynomials.len()-1].clone();
+        let mut val = F::zero();
+        for i in 0..=(self.k_domain_size+1) {
+            val += (lagrange_multipliers[i] * polynomial[i]);
+        }
+
+       // println!("{}, {}, {}, {}", val, prod, prod/val, val/prod);
+       assert_eq!(val, prod, "The final check did not match");
+        */
         LagrangianFoldingProof::<F> {
             round_polynomials: round_polynomials
         }
@@ -439,6 +532,7 @@ impl<F: PrimeField> LagrangeFoldingArgument<F> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
     use ark_bls12_381::Bls12_381;
     use ark_ec::PairingEngine;
     use ark_std::test_rng;
@@ -450,6 +544,12 @@ mod tests {
     pub fn test_folding_argument()
     {
         test_folding_argument_helper::<Bls12_381>();
+    }
+
+    #[test]
+    pub fn test_lagrangian_folding()
+    {
+        test_lagrangian_folding_helper::<Bls12_381>();
     }
 
     fn test_folding_argument_helper<E: PairingEngine>()
@@ -491,5 +591,21 @@ mod tests {
 
         let x = E::Fr::rand(&mut rng);
         let pi = packed_P.partial_open(x, &afg_pp);
+    }
+
+    fn test_lagrangian_folding_helper<E: PairingEngine>()
+    {
+        let k_domain_size = 20usize;
+        let mut ch_vec: Vec<E::Fr> = Vec::new();
+        let mut rng = test_rng();
+
+        for i in 0..k_domain_size {
+            ch_vec.push(E::Fr::rand(&mut rng));
+        }
+
+        let lf_arg: LagrangeFoldingArgument<E::Fr> = LagrangeFoldingArgument::new(k_domain_size, &ch_vec, E::Fr::from(2 as u128), E::Fr::rand(&mut rng));
+        let mut start = Instant::now();
+        let lf_proof = lf_arg.proof();
+        println!("Lagrangian folding for {} bits tooks {} msec", k_domain_size, start.elapsed().as_millis());
     }
 }
