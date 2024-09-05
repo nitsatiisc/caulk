@@ -1,6 +1,6 @@
 // This file contains artifacts for AFG commitment scheme
 
-use std::ops::{Mul, MulAssign};
+use std::ops::{Add, Mul, MulAssign, Neg};
 use std::time::Instant;
 use ark_ec::msm::VariableBaseMSM;
 use ark_ec::{AffineCurve, PairingEngine, ProjectiveCurve};
@@ -80,7 +80,6 @@ impl<E: PairingEngine> AFGSetup<E> {
         let domain = GeneralEvaluationDomain::<E::Fr>::new(K).unwrap();
         let afg_pp = PublicParameters::<E>::setup(&K, &K, &k_domain_size, &k_domain_size);
         let mut ck: Vec<E::G2Affine> = Vec::new();
-        ck.push(afg_pp.g2_powers[0]);
         for i in 0..K {
             ck.push(afg_pp.g2_powers[i]);
         }
@@ -108,8 +107,8 @@ pub struct PackedPolynomial<E: PairingEngine> {
 pub struct PartialOpenProof<E: PairingEngine> {
     uni_com: E::G1Affine,                               // commitment to univariate restriction
     round_comms: Vec<E::Fqk>,                           // round cross commitments (of folded witness)
-    round_ip:    Vec<E::G1Affine>,                      // round cross inner products (of folded witness and linear form)
-    lf_proof: Vec<DensePolynomial<E::Fr>>,              // lagrangian folding proof
+    round_ip: Vec<E::G1Affine>,                         // round cross inner products (of folded witness and linear form)
+    lf_proof: LagrangianFoldingProof<E::Fr>,            // lagrangian folding proof
 }
 
 impl<E: PairingEngine> PackedPolynomial<E> {
@@ -136,20 +135,38 @@ impl<E: PairingEngine> PackedPolynomial<E> {
 
     }
 
+    // Output commitment to univariate restriction of bivariate polynomial with proof.
+    // Inputs:
+    // - Bivariate packed polynomial P(X,Y)
+    // - The value x, to which the variable X is bound
+    // - The afg setup (afg_pp) containing commitment keys for pairing product.
+    // Output:
+    // - Commitment to univariate polynomial P(x,Y)
+    // - CSP proof showing above commitment is consistent with commitment to P(X,Y)
+    // As part of proof, the prover provides following:
+    // - Final folded commitment key for pairing product. This should be commitment
+    // - to polynomial \prod_i (1 + c_i X^{n/2^{i+1}}) in G2.
+    // - kzg proof that shows evaluation agrees with above at random point.
+    // - final folded linear form. This is a scalar value, which must be equal to
+    // [1 c_{l-1}, ..., c_0..c_{l-1}].INV_FFT.(1 x x^2,..,x^{n-1})
+    // - Lagrangian folding proof showing v is equal to the above.
+    #[allow(non_snake_case)]
     pub fn partial_open(&self, x: E::Fr, afg_pp: &AFGSetup<E>) -> PartialOpenProof<E> {
         // compute vector [\mu_0(x),\ldots,m_{n-1}(x)} of lagrange evaluations at x
         let n = 1usize << self.k_domain_size;
         let domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(n).unwrap();
-        let mut lf: Vec<E::Fr> = Vec::new();
         let zh_x = domain.evaluate_vanishing_polynomial(x);
-        for i in 0..n {
+
+        let mut lf = (0..n).into_par_iter().map(|i| {
             let temp = zh_x.mul((x - domain.element(i)).inverse().unwrap()).mul(domain.element(i));
-            lf.push(temp * E::Fr::from(n as u128).inverse().unwrap());
-        }
+            temp * E::Fr::from(n as u128).inverse().unwrap()
+        }).collect::<Vec<_>>();
 
         let lf_bigint = lf.par_iter().map(|x| x.into_repr()).collect::<Vec<_>>();
+
         // compute commitment to P(x,Y) = prod_{i=0}^{n-1} e(coeffs[i], ck[i])
-        let uni_com = VariableBaseMSM::multi_scalar_mul(&self.ucomms, &lf_bigint).into_affine();
+        let uni_com =
+            VariableBaseMSM::multi_scalar_mul(&self.ucomms, &lf_bigint).into_affine();
 
         // cross commitments and cross inner products for each round
         let mut round_comms: Vec<E::Fqk> = Vec::new();
@@ -174,24 +191,25 @@ impl<E: PairingEngine> PackedPolynomial<E> {
             let lf_left_bigint = lf_left.iter().map(|x| x.into_repr()).collect::<Vec<_>>();
             let lf_right_bigint = lf_right.iter().map(|x| x.into_repr()).collect::<Vec<_>>();
 
-            let mut pairing_inputs_left: Vec<(E::G1Prepared, E::G2Prepared)> = Vec::new();
-            let mut pairing_inputs_right: Vec<(E::G1Prepared, E::G2Prepared)> = Vec::new();
+            let mut pairing_inputs_left = (0..wit_left.len()).into_par_iter().map(|i| {
+                (E::G1Prepared::from(wit_right[i]), E::G2Prepared::from(ck_left[i]))
+            }).collect::<Vec<_>>();
 
-            for i in 0..wit_left.len() {
-                pairing_inputs_left.push(
-                    (E::G1Prepared::from(wit_right[i]), E::G2Prepared::from(ck_left[i]))
-                );
+            let mut pairing_inputs_right = (0..wit_right.len()).into_par_iter().map(|i| {
+                (E::G1Prepared::from(wit_left[i]), E::G2Prepared::from(ck_right[i]))
+            }).collect::<Vec<_>>();
 
-                pairing_inputs_right.push(
-                    (E::G1Prepared::from(wit_left[i]), E::G2Prepared::from(ck_right[i]))
-                );
-            }
+            // compute cross-commitments, the product of pairings and scalar products
+            let (c_L, c_R) = rayon::join(
+                || E::product_of_pairings(pairing_inputs_left.iter()),
+                || E::product_of_pairings(pairing_inputs_right.iter())
+            );
 
-            // compute cross-commitments, namely the product of pairings and scalar products
-            let c_L = E::product_of_pairings(pairing_inputs_left.iter());
-            let c_R= E::product_of_pairings(pairing_inputs_right.iter());
-            let ip_L = VariableBaseMSM::multi_scalar_mul(&wit_right, &lf_left_bigint).into_affine();
-            let ip_R = VariableBaseMSM::multi_scalar_mul(&wit_left, &lf_right_bigint).into_affine();
+            let (ip_L, ip_R) =
+                rayon::join(
+                || VariableBaseMSM::multi_scalar_mul(&wit_right, &lf_left_bigint).into_affine(),
+                || VariableBaseMSM::multi_scalar_mul(&wit_left, &lf_right_bigint).into_affine()
+            );
 
             round_comms.push(c_L);
             round_comms.push(c_R);
@@ -213,15 +231,22 @@ impl<E: PairingEngine> PackedPolynomial<E> {
 
             // collapse the vectors
             lf = combine_field_vec::<E>(&lf_left, &lf_right, ch);
-            witness_vec = combine_g1_vec::<E>(&wit_left, &wit_right, ch.inverse().unwrap());
-            ck_vec = combine_g2_vec::<E>(&ck_left, &ck_right, ch);
+            (witness_vec, ck_vec) = rayon::join(
+                || combine_g1_vec::<E>(&wit_left, &wit_right, ch.inverse().unwrap()),
+                || combine_g2_vec::<E>(&ck_left, &ck_right, ch)
+            );
         }
 
-        // sanity test
-        // ck_vec[0] is commitment to the univariate polynomial \prod_{i=0}^{\ell-1}(1 + c_i X^{n/2^(i+1)})
-        // build the polynomial coefficient vector
-        let mut poly_coeffs: Vec<E::Fr> = Vec::new();
-        for i in 0..n {
+        // add the final folded keys and final witness to the transcript
+        transcript.append_element(b"final_ck", &ck_vec[0]);
+        transcript.append_element(b"final_lf", &lf[0]);
+        transcript.append_element(b"final_wit", &witness_vec[0]);
+
+        // get the evaluation challenge to check correctness of folded ck
+        let alpha = transcript.get_and_append_challenge(b"ch_alpha");
+
+        // prover computes the polynomial describing the final commitment key ck
+        let poly_coeffs = (0..n).into_par_iter().map(|i| {
             let mut j = i;
             let mut coeff = E::Fr::one();
             for idx in 0..self.k_domain_size {
@@ -231,12 +256,23 @@ impl<E: PairingEngine> PackedPolynomial<E> {
                 }
                 j = j >> 1;
             }
-            poly_coeffs.push(coeff);
-        }
-
+            coeff
+        }).collect::<Vec<_>>();
         let ck_poly: DensePolynomial<E::Fr> = DensePolynomial::from_coefficients_vec(poly_coeffs.clone());
         let ck_poly_com = KZGCommit::<E>::commit_g2(&afg_pp.ck, &ck_poly);
         assert_eq!(ck_vec[0], ck_poly_com, "Folded commitment does not match");
+
+        let ck_poly_alpha = ck_poly.evaluate(&alpha);
+        let ck_alpha = &(&ck_poly - &DensePolynomial::from_coefficients_slice(&[ck_poly_alpha]))
+                                                    / &DensePolynomial::from_coefficients_slice(&[E::Fr::zero() - alpha, E::Fr::one()]);
+        let pi_alpha = KZGCommit::<E>::commit_g2(&afg_pp.ck, &ck_alpha);
+
+        transcript.append_element(b"pi_ck", &pi_alpha);
+
+        assert_eq!(E::pairing(afg_pp.vk[1].add(afg_pp.vk[0].mul(alpha).into_affine().neg()), pi_alpha),
+            E::pairing(afg_pp.vk[0], ck_vec[0].add(afg_pp.ck[0].mul(ck_poly_alpha).into_affine().neg())), "pairing check failed");
+
+
 
         // check that the folded linear form key is correct.
         // evaluate the folded polynomial (1 + X_0(c_{l-1}-1))(1+X_1(c_{l-2}-1))..(1 + X_{l-1}(c_0-1))
@@ -258,9 +294,9 @@ impl<E: PairingEngine> PackedPolynomial<E> {
 
         PartialOpenProof::<E> {
             uni_com: uni_com,
-            round_comms: vec![],
-            round_ip: vec![],
-            lf_proof: vec![],
+            round_comms: round_comms,
+            round_ip: round_ip,
+            lf_proof: lf_proof,
         }
 
     }
@@ -615,7 +651,7 @@ mod tests {
 
     fn test_lagrangian_folding_helper<E: PairingEngine>()
     {
-        let k_domain_size = 20usize;
+        let k_domain_size = 23usize;
         let mut ch_vec: Vec<E::Fr> = Vec::new();
         let mut rng = test_rng();
 
