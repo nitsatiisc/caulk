@@ -8,6 +8,7 @@ pub(crate) mod util;
 mod ramlookup;
 mod plonk;
 mod afgo;
+mod aplonk;
 
 pub use dft::*;
 pub use kzg::KZGCommit;

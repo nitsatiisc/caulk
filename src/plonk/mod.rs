@@ -13,6 +13,7 @@ use ark_poly::univariate::DensePolynomial;
 use rand::RngCore;
 use crate::{CaulkTranscript, KZGCommit, PublicParameters};
 use crate::ramlookup::{compute_aggregate_poly, compute_scaled_polynomial, compute_shifted_difference, compute_sum_poly};
+use rayon::iter::ParallelIterator;
 
 pub struct PlonkSetup<F: PrimeField> {
     pub h_domain_size: usize,                   // domain size in bits
@@ -125,7 +126,7 @@ pub fn compute_plonk_proof<E: PairingEngine>(
     let factor_2 = &wb_poly + &(&compute_scaled_polynomial::<E>(&x_poly, beta*plonk_setup.k1) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
     let factor_3 = &wc_poly + &(&compute_scaled_polynomial::<E>(&x_poly, beta*plonk_setup.k2) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
     let t_part_2 = &(&factor_1 * &factor_2) * &(&factor_3 * &z_poly);
-    let zw_poly = compute_shifted_difference::<E>(&z_poly, plonk_setup.h_domain_size).add(z_poly.clone());
+    let zw_poly = &compute_shifted_difference::<E>(&z_poly, plonk_setup.h_domain_size) + &z_poly;
     let factor_1 = &wa_poly + &(&compute_scaled_polynomial::<E>(&circuit.S_a, beta) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
     let factor_2 = &wb_poly + &(&compute_scaled_polynomial::<E>(&circuit.S_b, beta) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
     let factor_3 = &wc_poly + &(&compute_scaled_polynomial::<E>(&circuit.S_c, beta) + &DensePolynomial::from_coefficients_vec(vec![gamma]));
@@ -729,6 +730,9 @@ mod tests {
     use ark_ec::PairingEngine;
     use ark_ff::{One, Zero};
     use ark_std::{test_rng, UniformRand};
+    use rayon::iter::IntoParallelIterator;
+    use crate::afgo::AFGSetup;
+    use crate::aplonk::compute_aplonk_proof;
     use crate::plonk::gadgets::{InnerProductComponent, RangeCheckComponent};
 
 
@@ -925,12 +929,14 @@ mod tests {
     fn test_witness_polynomials_helper<E: PairingEngine>()
     {
         let mut rng = test_rng();
-        let srs_size: usize = 15;
+        let srs_size: usize = 17;
         let N = 1usize << srs_size;
+        let D: usize = 1usize << 20;
         let m = 1usize << 5;
-        let max_degree = N;
+        let max_degree = D;
+        let k_domain_size: usize = 4;
         // Generate SRS for degree N
-        let pp: PublicParameters<E> = PublicParameters::setup(&max_degree, &N, &m, &srs_size);
+        let pp: PublicParameters<E> = PublicParameters::setup(&max_degree, &D, &m, &srs_size);
         let plonk_setup = PlonkSetup::<E::Fr>::new(srs_size, &mut rng);
 
         let mut pb: Protoboard<E::Fr> = Protoboard::new();
@@ -973,6 +979,7 @@ mod tests {
         let witness = pb.output_witness();
         //let (wa_poly, wb_poly, wc_poly, wa_com, wb_com, wc_com) = compute_witness_polynomials(&witness, &plonk_setup, &pp);
         println!("Time to generate witness: {}", start.elapsed().as_secs());
+
         // comnpute circuit witness polynomial
         //let cw_poly = (&circuit.q_M * &(&wa_poly * &wb_poly)).add(&circuit.q_L * &wa_poly).add(&circuit.q_R * &wb_poly).add(&circuit.q_O * &wc_poly).add(circuit.q_C.clone());
         //let (q_poly, _) = cw_poly.divide_by_vanishing_poly(plonk_setup.domain).unwrap();
@@ -980,11 +987,24 @@ mod tests {
 
         //assert_eq!(cw_poly.evaluate(&alpha), q_poly.evaluate(&alpha) * plonk_setup.domain.evaluate_vanishing_polynomial(alpha), "Polynomial Identity not Satisfied");
 
-        println!("Generating PLONK Proof");
-        let mut start = Instant::now();
-        let proof = compute_plonk_proof(&circuit_pp, &circuit, &witness, &plonk_setup, &pp);
-        println!("Time to generate proof = {} secs", start.elapsed().as_secs());
+        // To test plonk aggregation, we duplicate the witness K times
+        // Now generate an aggregate proof (we will aggregate
+        let K = 1usize << k_domain_size;
+        let afg_pp = AFGSetup::new(k_domain_size, &mut rng);
+        let mut agg_witness: Vec<Vec<E::Fr>> = Vec::new();
+        for _ in 0..K {
+            agg_witness.push(witness.clone());
+        }
 
+        println!("Generating PLONK Proofs");
+        let mut start = Instant::now();
+        let proof = (0..K).into_par_iter().map(|i| compute_plonk_proof(&circuit_pp, &circuit, &agg_witness[i], &plonk_setup, &pp)).collect::<Vec<_>>();
+        println!("Time to generate proofs = {} secs", start.elapsed().as_secs());
+
+        println!("Generating Aggregated Proof");
+        start = Instant::now();
+        compute_aplonk_proof(k_domain_size, &circuit_pp, &circuit, &agg_witness, &plonk_setup, &pp, &afg_pp);
+        println!("Time to generate aggregate proof = {} secs", start.elapsed().as_secs());
     }
 
 

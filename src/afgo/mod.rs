@@ -14,6 +14,7 @@ use rand::RngCore;
 use rayon::prelude::*;
 //use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator};
 use crate::{CaulkTranscript, KZGCommit, PublicParameters};
+use crate::ramlookup::caulkplus::CaulkPlusExample;
 
 pub struct AFGSetup<E: PairingEngine> {
     pub k_domain_size: usize,
@@ -115,10 +116,9 @@ impl<E: PairingEngine> PackedPolynomial<E> {
     pub fn new(k_domain_size: usize, coeffs: &Vec<DensePolynomial<E::Fr>>, afg_pp: &AFGSetup<E>, pp: &PublicParameters<E>) -> Self {
         let n: usize = 1usize << k_domain_size;
         let domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(n).unwrap();
-        let mut ucomms: Vec<E::G1Affine> = Vec::new();
-        for i in 0..n {
-            ucomms.push(KZGCommit::commit_g1(&pp.poly_ck, &coeffs[i]));
-        }
+        let mut ucomms: Vec<E::G1Affine> = (0..n).into_par_iter().map(|i| {
+            KZGCommit::commit_g1(&pp.poly_ck, &coeffs[i])
+        }).collect::<Vec<_>>();
 
         let mut com = E::Fqk::one();
         for i in 0..n {
@@ -133,6 +133,38 @@ impl<E: PairingEngine> PackedPolynomial<E> {
             ucomms
         }
 
+    }
+
+    pub fn new_with_comms(k_domain_size: usize, coeffs: &Vec<DensePolynomial<E::Fr>>, ucomms: &Vec<E::G1Affine>, afg_pp: &AFGSetup<E>, pp: &PublicParameters<E>) -> Self {
+        let n: usize = 1usize << k_domain_size;
+        let domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(n).unwrap();
+
+        let mut com = E::Fqk::one();
+        for i in 0..n {
+            com.mul_assign(E::pairing(ucomms[i], afg_pp.ck[i]));
+        }
+
+        Self {
+            k_domain_size,
+            domain,
+            coeffs: coeffs.clone(),
+            com,
+            ucomms: ucomms.clone(),
+        }
+
+    }
+
+    pub fn partial_eval_y(&self, y: E::Fr)
+        -> DensePolynomial<E::Fr>
+    {
+        let n = 1usize << self.k_domain_size;
+        let domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(n).unwrap();
+
+        // get a vector of evaluations of constituent polynomials at y
+        // These evaluations will form the lagrange coefficients of the polynomial in X
+        let evals_over_H = self.coeffs.par_iter().map(|p| p.evaluate(&y)).collect::<Vec<_>>();
+        let poly_coeffs = domain.ifft(&evals_over_H);
+        DensePolynomial::from_coefficients_vec(poly_coeffs)
     }
 
     // Output commitment to univariate restriction of bivariate polynomial with proof.
@@ -610,8 +642,8 @@ mod tests {
 
     fn test_folding_argument_helper<E: PairingEngine>()
     {
-        let k_domain_size: usize = 3;
-        let h_domain_size: usize = 10;
+        let k_domain_size: usize = 8;
+        let h_domain_size: usize = 15;
 
         let m: usize = 1usize << h_domain_size;
         let n = 1usize << k_domain_size;
@@ -620,38 +652,41 @@ mod tests {
         let mut rng = test_rng();
         let afg_pp: AFGSetup<E> = AFGSetup::<E>::new(k_domain_size, &mut rng);
         let mut uni_poly_coeffs = vec![vec![E::Fr::zero(); m]; n];
-        // polynomials to pack
 
-        let uni_poly_coeffs = vec![
-            [E::Fr::zero(), E::Fr::zero(), E::Fr::zero()],
-            [E::Fr::zero(), E::Fr::zero(), E::Fr::one()],
-            [E::Fr::zero(), E::Fr::one(), E::Fr::zero()],
-            [E::Fr::zero(), E::Fr::one(), E::Fr::one()],
-            [E::Fr::one(), E::Fr::zero(), E::Fr::zero()],
-            [E::Fr::one(), E::Fr::zero(), E::Fr::one()],
-            [E::Fr::one(), E::Fr::one(), E::Fr::zero()],
-            [E::Fr::one(), E::Fr::one(), E::Fr::one()],
-        ];
-
-        let mut uni_poly_vec: Vec<DensePolynomial<E::Fr>> = Vec::new();
-        for i in 0..uni_poly_coeffs.len() {
-            uni_poly_vec.push(DensePolynomial::from_coefficients_slice(&uni_poly_coeffs[i]));
+        // assign random values to coefficients in the range 0..100
+        for i in 0..n {
+            for j in 0..m {
+                uni_poly_coeffs[i][j] = E::Fr::from(u128::rand(&mut rng) % 100);
+            }
         }
 
+        println!("Building {} polynomials", n);
+        let mut start = Instant::now();
+        let uni_poly_vec= (0..n).into_par_iter().map(|i| {
+            DensePolynomial::from_coefficients_slice(&uni_poly_coeffs[i])
+        }).collect();
+        println!("Built {} polynomials in {} msec", n, start.elapsed().as_millis());
+
+        println!("Packing {} polynomials", n);
+        start = Instant::now();
         let packed_P = PackedPolynomial::<E>::new(
             k_domain_size,
             &uni_poly_vec,
             &afg_pp,
             &pp
         );
+        println!("Packed {} polynomials in {} msec", n, start.elapsed().as_millis());
 
         let x = E::Fr::rand(&mut rng);
+        println!("Opening univariate restriction");
+        start = Instant::now();
         let pi = packed_P.partial_open(x, &afg_pp);
+        println!("Time to open = {} msec", start.elapsed().as_millis());
     }
 
     fn test_lagrangian_folding_helper<E: PairingEngine>()
     {
-        let k_domain_size = 23usize;
+        let k_domain_size = 20usize;
         let mut ch_vec: Vec<E::Fr> = Vec::new();
         let mut rng = test_rng();
 
