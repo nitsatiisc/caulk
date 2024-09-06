@@ -945,17 +945,19 @@ pub mod tests {
     fn test_poly_mult_helper<E: PairingEngine>() {
         let mut rng = test_rng();
 
-        let degree: usize = 1usize << 20;
-        let npolys: usize = 1;
+        let degree: usize = 1usize << 16;
+        let npolys: usize = 32;
         let mut rand_A_polys: Vec<DensePolynomial<E::Fr>> = Vec::new();
         let mut rand_B_polys: Vec<DensePolynomial<E::Fr>> = Vec::new();
         let mut rand_C_polys: Vec<DensePolynomial<E::Fr>> = Vec::new();
+        let mut rand_D_polys: Vec<DensePolynomial<E::Fr>> = Vec::new();
+
 
         for i in 0..npolys {
             rand_A_polys.push(DensePolynomial::rand(degree, &mut rng));
             rand_B_polys.push(DensePolynomial::rand(degree, &mut rng));
         }
-
+        /*
         let mut start = Instant::now();
         for i in 0..npolys {
             rand_C_polys.push(&rand_A_polys[i] * &rand_B_polys[i]);
@@ -963,6 +965,8 @@ pub mod tests {
         println!("FFT multiplication took {} secs", start.elapsed().as_secs());
 
         rand_C_polys.clear();
+
+         */
         let mut start = Instant::now();
         let eval_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(2*degree).unwrap();
         for i in 0..npolys {
@@ -973,25 +977,26 @@ pub mod tests {
             rand_C_polys.push(res);
         }
         println!("FFT multiplication with eval domain took {} secs", start.elapsed().as_secs());
-        rand_C_polys.clear();
+        //rand_C_polys.clear();
 
-        let input_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(1usize << 21).unwrap();
+        let input_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(2*degree).unwrap();
 
         start = Instant::now();
-        let mut fft_C: Vec<E::Fr> = Vec::with_capacity(1usize << 21);
-        fft_C.resize(1usize << 21, E::Fr::zero());
+        let mut fft_C: Vec<E::Fr> = Vec::new();
+        fft_C.resize(2*degree, E::Fr::zero());
 
         for i in 0..npolys {
-            let fft_A: Vec<E::Fr> = field_fft_domain(&rand_A_polys[i].coeffs, 21, &input_domain);
-            let fft_B: Vec<E::Fr> = field_fft_domain(&rand_B_polys[i].coeffs, 21, &input_domain);
+            let fft_A: Vec<E::Fr> = field_fft_domain(&rand_A_polys[i].coeffs, 17, &input_domain);
+            let fft_B: Vec<E::Fr> = field_fft_domain(&rand_B_polys[i].coeffs, 17, &input_domain);
             for j in 0..fft_A.len() {
                 fft_C[j] = fft_A[j] * fft_B[j];
             }
-            let fft_res: Vec<E::Fr> = field_ifft_domain(&fft_C, 21, &input_domain);
-            rand_C_polys.push(DensePolynomial::from_coefficients_vec(fft_res));
+            let fft_res: Vec<E::Fr> = field_ifft_domain(&fft_C, 17, &input_domain);
+            rand_D_polys.push(DensePolynomial::from_coefficients_vec(fft_res));
         }
 
-        println!("FFT multiplication with eval domain took {} secs", start.elapsed().as_secs());
+        println!("FFT multiplication with butterfly eval domain took {} secs", start.elapsed().as_secs());
+        assert_eq!(rand_C_polys[0], rand_D_polys[0], "Polynomials not equal");
     }
 
     fn test_dft_helper<E: PairingEngine>() {

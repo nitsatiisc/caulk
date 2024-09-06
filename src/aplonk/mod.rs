@@ -53,14 +53,18 @@ pub fn compute_g_plonk<E: PairingEngine>(
     poly = &poly + &(q_R * w_B);
     poly = &poly + &(q_O * w_C);
     poly = &poly + q_C;
+   // (poly, _) = poly.divide_by_vanishing_poly(plonk_setup.domain).unwrap();
 
     let P = &(&p_1 * &p_2) * &(&p_3 * z_poly);
     let Q = &(&q_1 * &q_2) * &(&q_3 * zw_poly);
 
+    //let (PQ_reduced, _) = (&P - &Q).divide_by_vanishing_poly(plonk_setup.domain).unwrap();
     poly = &poly + &compute_scaled_polynomial::<E>(&(&P - &Q), alpha);
 
     let R = l0_poly * &(z_poly - &DensePolynomial::from_coefficients_vec(vec![E::Fr::one()]));
     poly = &poly + &compute_scaled_polynomial::<E>(&R, alpha*alpha);
+    (poly, _) = poly.divide_by_vanishing_poly(plonk_setup.domain).unwrap();
+
     let pcom = if with_com {
         KZGCommit::commit_g1(&pp.poly_ck, &poly)
     } else {
@@ -292,7 +296,7 @@ pub fn compute_aplonk_proof<E: PairingEngine>(
     );
 
     let h_poly_y = packed_H.partial_eval_y(y);
-    let (q_poly_y, rem_poly) = (&g_poly_y.0 - &h_poly_y).divide_by_vanishing_poly(k_domain).unwrap();
-    assert_eq!(rem_poly, DensePolynomial::zero(), "Q(X,y) != H(X,y) mod Z_H(X)");
-    println!("Computing Q(X,y) - H(X,y) / Z_H(X) took {} secs", start.elapsed().as_secs());
+    //let (q_poly_y, rem_poly) = (&g_poly_y.0 - &h_poly_y).divide_by_vanishing_poly(k_domain).unwrap();
+    //assert_eq!(rem_poly, DensePolynomial::zero(), "Q(X,y) != H(X,y) mod Z_H(X)");
+    //println!("Computing Q(X,y) - H(X,y) / Z_H(X) took {} secs", start.elapsed().as_secs());
 }

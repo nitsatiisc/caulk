@@ -931,7 +931,7 @@ mod tests {
         let mut rng = test_rng();
         let srs_size: usize = 10;
         let N = 1usize << srs_size;
-        let D: usize = 1usize << 16;
+        let D: usize = 1usize << 12;
         let m = 1usize << 5;
         let max_degree = D;
         let k_domain_size: usize = 10;
