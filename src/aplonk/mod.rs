@@ -33,7 +33,8 @@ pub fn compute_g_plonk<E: PairingEngine>(
     beta: E::Fr,
     gamma: E::Fr,
     plonk_setup: &PlonkSetup<E::Fr>,
-) -> DensePolynomial<E::Fr>
+    pp: &PublicParameters<E>,
+) -> (DensePolynomial<E::Fr>, E::G1Affine)
 {
     //let zw_poly = &compute_shifted_difference::<E>(&z_poly, plonk_setup.h_domain_size) + z_poly;
     let gamma_poly = DensePolynomial::from_coefficients_vec(vec![gamma]);
@@ -58,8 +59,8 @@ pub fn compute_g_plonk<E: PairingEngine>(
 
     let R = &plonk_setup.l0_poly * &(z_poly - &DensePolynomial::from_coefficients_vec(vec![E::Fr::one()]));
     poly = &poly + &compute_scaled_polynomial::<E>(&R, alpha*alpha);
-
-    poly
+    let pcom = KZGCommit::commit_g1(&pp.poly_ck, &poly);
+    (poly, pcom)
 }
 
 pub fn compute_aplonk_proof<E: PairingEngine>(
@@ -95,7 +96,8 @@ pub fn compute_aplonk_proof<E: PairingEngine>(
     let all_w_polys = witness.into_par_iter().map(|w| {
         compute_witness_polynomials(w, plonk_setup, pp)
     }).collect::<Vec<_>>();
-
+    println!("Computed witness in {} secs", start.elapsed().as_secs());
+    start = Instant::now();
     //let (wa_poly, wb_poly, wc_poly, wa_com, wb_com, wc_com) =
     //    compute_witness_polynomials(
     //        witness,
@@ -114,15 +116,18 @@ pub fn compute_aplonk_proof<E: PairingEngine>(
     let wc_coms = all_w_polys.iter().map(|p| p.5).collect::<Vec<_>>();
 
     // Commit to packed polynomials
-    let w_A = PackedPolynomial::new_with_comms(k_domain_size, &wa_polys, &wa_coms, afg_pp, pp);
-    let w_B = PackedPolynomial::new_with_comms(k_domain_size, &wb_polys, &wb_coms, afg_pp, pp);
-    let w_C = PackedPolynomial::new_with_comms(k_domain_size, &wc_polys, &wc_coms, afg_pp, pp);
+    let w_packed = [(&wa_polys, wa_coms), (&wb_polys, wb_coms), (&wc_polys, wc_coms)].into_par_iter().map(|x|
+        PackedPolynomial::new_with_comms(k_domain_size, x.0, &x.1, afg_pp, pp)).collect::<Vec<_>>();
+
+    //let w_A = PackedPolynomial::new_with_comms(k_domain_size, &wa_polys, &wa_coms, afg_pp, pp);
+    //let w_B = PackedPolynomial::new_with_comms(k_domain_size, &wb_polys, &wb_coms, afg_pp, pp);
+    //let w_C = PackedPolynomial::new_with_comms(k_domain_size, &wc_polys, &wc_coms, afg_pp, pp);
 
     println!("Committed witness in {} secs", start.elapsed().as_secs());
 
-    transcript.append_element(b"a_com", &w_A.com);
-    transcript.append_element(b"b_com", &w_B.com);
-    transcript.append_element(b"c_com", &w_C.com);
+    transcript.append_element(b"a_com", &w_packed[0].com);
+    transcript.append_element(b"b_com", &w_packed[1].com);
+    transcript.append_element(b"c_com", &w_packed[2].com);
 
     // get challenges beta, gamma for computing z polynomial
     let beta = E::Fr::one(); //transcript.get_and_append_challenge(b"beta");
@@ -151,7 +156,7 @@ pub fn compute_aplonk_proof<E: PairingEngine>(
     start = Instant::now();
 
     // Compute H(X,Y) with component polynomials as G(A_i,B_i,...)
-    let h_polys = (0..K).into_par_iter().map(|i| {
+    let (h_polys, h_coms) = (0..K).into_par_iter().map(|i| {
         compute_g_plonk::<E>(
             &circuit.q_M,
             &circuit.q_L,
@@ -169,11 +174,12 @@ pub fn compute_aplonk_proof<E: PairingEngine>(
             alpha,
             beta,
             gamma,
-            plonk_setup
+            plonk_setup,
+            pp
         )
-    }).collect::<Vec<_>>();
+    }).collect::<Vec<(_,_)>>().into_iter().unzip();
 
-    let packed_H = PackedPolynomial::new(k_domain_size, &h_polys, afg_pp, pp);
+    let packed_H = PackedPolynomial::new_with_comms(k_domain_size, &h_polys, &h_coms, afg_pp, pp);
     println!("Computed H polynomial in {} secs", start.elapsed().as_secs());
 
     // Sanity check (H(X,Y) = 0 over H\times V).

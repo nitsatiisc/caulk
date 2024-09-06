@@ -138,7 +138,7 @@ pub fn compute_plonk_proof<E: PairingEngine>(
 
     let t_part_23 = &t_part_2 - &t_part_3;
     let t_poly_num = compute_aggregate_poly::<E>(&[t_part_1.clone(), t_part_23.clone(), t_part_4.clone()], alpha);
-    println!("Computed t numerator in {} secs", start.elapsed().as_secs());
+    //println!("Computed t numerator in {} secs", start.elapsed().as_secs());
 
     start = Instant::now();
     let (t_poly, _) = t_poly_num.divide_by_vanishing_poly(plonk_setup.domain).unwrap();
@@ -164,7 +164,7 @@ pub fn compute_plonk_proof<E: PairingEngine>(
     transcript.append_element(b"t_mid_com", &t_mid_com);
     transcript.append_element(b"t_hi_com", &t_hi_com);
 
-    println!("Committed to t polynomial in {} secs", start.elapsed().as_secs());
+    //println!("Committed to t polynomial in {} secs", start.elapsed().as_secs());
     let phi = transcript.get_and_append_challenge(b"phi");
 
     start = Instant::now();
@@ -183,7 +183,7 @@ pub fn compute_plonk_proof<E: PairingEngine>(
     transcript.append_element(b"sa_phi", &sa_phi);
     transcript.append_element(b"sb_phi", &sb_phi);
     transcript.append_element(b"zw_phi", &zw_phi);
-    println!("Sent evaluations in {} secs", start.elapsed().as_secs());
+    //println!("Sent evaluations in {} secs", start.elapsed().as_secs());
 
     let v = transcript.get_and_append_challenge(b"v");
     start = Instant::now();
@@ -929,12 +929,12 @@ mod tests {
     fn test_witness_polynomials_helper<E: PairingEngine>()
     {
         let mut rng = test_rng();
-        let srs_size: usize = 17;
+        let srs_size: usize = 10;
         let N = 1usize << srs_size;
-        let D: usize = 1usize << 20;
+        let D: usize = 1usize << 16;
         let m = 1usize << 5;
         let max_degree = D;
-        let k_domain_size: usize = 4;
+        let k_domain_size: usize = 10;
         // Generate SRS for degree N
         let pp: PublicParameters<E> = PublicParameters::setup(&max_degree, &D, &m, &srs_size);
         let plonk_setup = PlonkSetup::<E::Fr>::new(srs_size, &mut rng);
@@ -990,22 +990,27 @@ mod tests {
         // To test plonk aggregation, we duplicate the witness K times
         // Now generate an aggregate proof (we will aggregate
         let K = 1usize << k_domain_size;
-        let afg_pp = AFGSetup::new(k_domain_size, &mut rng);
+        let afg_pp = AFGSetup::<E>::new(k_domain_size, &mut rng);
         let mut agg_witness: Vec<Vec<E::Fr>> = Vec::new();
         for _ in 0..K {
             agg_witness.push(witness.clone());
         }
 
+        /*
         println!("Generating PLONK Proofs");
         let mut start = Instant::now();
         let proof = (0..K).into_par_iter().map(|i| compute_plonk_proof(&circuit_pp, &circuit, &agg_witness[i], &plonk_setup, &pp)).collect::<Vec<_>>();
         println!("Time to generate proofs = {} secs", start.elapsed().as_secs());
+        */
+
 
         println!("Generating Aggregated Proof");
         start = Instant::now();
         compute_aplonk_proof(k_domain_size, &circuit_pp, &circuit, &agg_witness, &plonk_setup, &pp, &afg_pp);
         println!("Time to generate aggregate proof = {} secs", start.elapsed().as_secs());
+
     }
+
 
 
 }
