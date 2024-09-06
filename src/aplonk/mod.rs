@@ -24,6 +24,7 @@ pub fn compute_g_plonk<E: PairingEngine>(
     S_a: &DensePolynomial<E::Fr>,
     S_b: &DensePolynomial<E::Fr>,
     S_c: &DensePolynomial<E::Fr>,
+    l0_poly: &DensePolynomial<E::Fr>,
     w_A: &DensePolynomial<E::Fr>,
     w_B: &DensePolynomial<E::Fr>,
     w_C: &DensePolynomial<E::Fr>,
@@ -34,6 +35,7 @@ pub fn compute_g_plonk<E: PairingEngine>(
     gamma: E::Fr,
     plonk_setup: &PlonkSetup<E::Fr>,
     pp: &PublicParameters<E>,
+    with_com: bool,
 ) -> (DensePolynomial<E::Fr>, E::G1Affine)
 {
     //let zw_poly = &compute_shifted_difference::<E>(&z_poly, plonk_setup.h_domain_size) + z_poly;
@@ -57,11 +59,75 @@ pub fn compute_g_plonk<E: PairingEngine>(
 
     poly = &poly + &compute_scaled_polynomial::<E>(&(&P - &Q), alpha);
 
-    let R = &plonk_setup.l0_poly * &(z_poly - &DensePolynomial::from_coefficients_vec(vec![E::Fr::one()]));
+    let R = l0_poly * &(z_poly - &DensePolynomial::from_coefficients_vec(vec![E::Fr::one()]));
     poly = &poly + &compute_scaled_polynomial::<E>(&R, alpha*alpha);
-    let pcom = KZGCommit::commit_g1(&pp.poly_ck, &poly);
+    let pcom = if with_com {
+        KZGCommit::commit_g1(&pp.poly_ck, &poly)
+    } else {
+        E::G1Affine::zero()
+    };
+
     (poly, pcom)
 }
+
+pub fn compute_g_plonk_y<E: PairingEngine>(
+    q_M: &DensePolynomial<E::Fr>,
+    q_L: &DensePolynomial<E::Fr>,
+    q_R: &DensePolynomial<E::Fr>,
+    q_O: &DensePolynomial<E::Fr>,
+    q_C: &DensePolynomial<E::Fr>,
+    S_a: &DensePolynomial<E::Fr>,
+    S_b: &DensePolynomial<E::Fr>,
+    S_c: &DensePolynomial<E::Fr>,
+    l0_poly: &DensePolynomial<E::Fr>,
+    w_A: &DensePolynomial<E::Fr>,
+    w_B: &DensePolynomial<E::Fr>,
+    w_C: &DensePolynomial<E::Fr>,
+    z_poly: &DensePolynomial<E::Fr>,
+    zw_poly: &DensePolynomial<E::Fr>,
+    alpha: E::Fr,
+    beta: E::Fr,
+    gamma: E::Fr,
+    y: E::Fr,
+    plonk_setup: &PlonkSetup<E::Fr>,
+    pp: &PublicParameters<E>,
+    with_com: bool,
+) -> (DensePolynomial<E::Fr>, E::G1Affine)
+{
+    //let zw_poly = &compute_shifted_difference::<E>(&z_poly, plonk_setup.h_domain_size) + z_poly;
+    let gamma_poly = DensePolynomial::from_coefficients_vec(vec![gamma]);
+    let w_AB = w_A * w_B;
+    let p_1 = w_A + &DensePolynomial::from_coefficients_vec(vec![gamma + y*beta]);
+    let p_2 = w_B + &DensePolynomial::from_coefficients_vec(vec![gamma + y*beta*plonk_setup.k1]);
+    let p_3 = w_C + &DensePolynomial::from_coefficients_vec(vec![gamma + y*beta*plonk_setup.k2]);
+    let q_1 = w_A + &(&compute_scaled_polynomial::<E>(&S_a, beta) + &gamma_poly);
+    let q_2 = w_B + &(&compute_scaled_polynomial::<E>(&S_b, beta) + &gamma_poly);
+    let q_3 = w_C + &(&compute_scaled_polynomial::<E>(&S_c, beta) + &gamma_poly);
+    let mut poly = DensePolynomial::<E::Fr>::zero();
+    poly = &poly + &(q_M * &w_AB);
+    poly = &poly + &(q_L * w_A);
+    poly = &poly + &(q_R * w_B);
+    poly = &poly + &(q_O * w_C);
+    poly = &poly + q_C;
+
+    let P = &(&p_1 * &p_2) * &(&p_3 * z_poly);
+    let Q = &(&q_1 * &q_2) * &(&q_3 * zw_poly);
+
+    poly = &poly + &compute_scaled_polynomial::<E>(&(&P - &Q), alpha);
+
+    let R = l0_poly * &(z_poly - &DensePolynomial::from_coefficients_vec(vec![E::Fr::one()]));
+    poly = &poly + &compute_scaled_polynomial::<E>(&R, alpha*alpha);
+    let pcom = if with_com {
+        KZGCommit::commit_g1(&pp.poly_ck, &poly)
+    } else {
+        E::G1Affine::zero()
+    };
+
+    (poly, pcom)
+}
+
+
+
 
 pub fn compute_aplonk_proof<E: PairingEngine>(
     k_domain_size: usize,
@@ -166,6 +232,7 @@ pub fn compute_aplonk_proof<E: PairingEngine>(
             &circuit.S_a,
             &circuit.S_b,
             &circuit.S_c,
+            &plonk_setup.l0_poly,
             &wa_polys[i],
             &wb_polys[i],
             &wc_polys[i],
@@ -175,7 +242,8 @@ pub fn compute_aplonk_proof<E: PairingEngine>(
             beta,
             gamma,
             plonk_setup,
-            pp
+            pp,
+            true
         )
     }).collect::<Vec<(_,_)>>().into_iter().unzip();
 
@@ -183,5 +251,48 @@ pub fn compute_aplonk_proof<E: PairingEngine>(
     println!("Computed H polynomial in {} secs", start.elapsed().as_secs());
 
     // Sanity check (H(X,Y) = 0 over H\times V).
-    assert_eq!(h_polys[1].evaluate(&plonk_setup.domain.element(1)), E::Fr::zero(), "H does not vanish over H x V");
+    //assert_eq!(h_polys[1].evaluate(&plonk_setup.domain.element(1)), E::Fr::zero(), "H does not vanish over H x V");
+
+    start = Instant::now();
+    // Compute polynomials Q(X,y) and H(X,y) for random y
+    let y = transcript.get_and_append_challenge(b"ch_y");
+
+    // evaluate q_M, q_L, q_R, q_O, q_C, S_a, S_b, S_c at y
+    let univariate_evals_y =
+        [&circuit.q_M, &circuit.q_L, &circuit.q_R, &circuit.q_O, &circuit.q_C, &circuit.S_a, &circuit.S_b, &circuit.S_c, &plonk_setup.l0_poly].into_par_iter()
+            .map(|p| p.evaluate(&y)).collect::<Vec<_>>();
+    let bivariate_evals_y =
+        [&w_packed[0], &w_packed[1], &w_packed[2], &z_poly].into_par_iter()
+            .map(|p| p.partial_eval_y(y)).collect::<Vec<_>>();
+
+    let zw_poly_evals_y = z_poly.partial_eval_y(plonk_setup.domain.element(1)*y);
+    // compute polynomial G(P_0(X,y),...P_l(X,y))
+    let g_poly_y = compute_g_plonk_y(
+        &DensePolynomial::from_coefficients_slice(&[univariate_evals_y[0]]),
+        &DensePolynomial::from_coefficients_slice(&[univariate_evals_y[1]]),
+        &DensePolynomial::from_coefficients_slice(&[univariate_evals_y[2]]),
+        &DensePolynomial::from_coefficients_slice(&[univariate_evals_y[3]]),
+        &DensePolynomial::from_coefficients_slice(&[univariate_evals_y[4]]),
+        &DensePolynomial::from_coefficients_slice(&[univariate_evals_y[5]]),
+        &DensePolynomial::from_coefficients_slice(&[univariate_evals_y[6]]),
+        &DensePolynomial::from_coefficients_slice(&[univariate_evals_y[7]]),
+        &DensePolynomial::from_coefficients_slice(&[univariate_evals_y[8]]),
+        &bivariate_evals_y[0],
+        &bivariate_evals_y[1],
+        &bivariate_evals_y[2],
+        &bivariate_evals_y[3],
+        &zw_poly_evals_y,
+        alpha,
+        beta,
+        gamma,
+        y,
+        plonk_setup,
+        pp,
+        false
+    );
+
+    let h_poly_y = packed_H.partial_eval_y(y);
+    let (q_poly_y, rem_poly) = (&g_poly_y.0 - &h_poly_y).divide_by_vanishing_poly(k_domain).unwrap();
+    assert_eq!(rem_poly, DensePolynomial::zero(), "Q(X,y) != H(X,y) mod Z_H(X)");
+    println!("Computing Q(X,y) - H(X,y) / Z_H(X) took {} secs", start.elapsed().as_secs());
 }
