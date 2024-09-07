@@ -200,7 +200,7 @@ pub fn compute_aplonk_proof<E: PairingEngine>(
     transcript.append_element(b"c_com", &w_packed[2].com);
 
     // get challenges beta, gamma for computing z polynomial
-    let beta = E::Fr::one(); //transcript.get_and_append_challenge(b"beta");
+    let beta = transcript.get_and_append_challenge(b"beta");
     let gamma = transcript.get_and_append_challenge(b"gamma");
 
     println!("Computing z polynomials");
