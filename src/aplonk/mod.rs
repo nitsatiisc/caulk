@@ -1,11 +1,13 @@
 // This file contains implementation of PLONK proof aggregation
 
-use std::ops::{Add, Sub};
+use std::iter::zip;
+use std::ops::{Add, Mul, Sub};
 use std::time::Instant;
 use ark_ec::PairingEngine;
 use ark_ff::{Field, One, PrimeField, Zero};
 use ark_poly::univariate::DensePolynomial;
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain, Polynomial, UVPolynomial};
+use ark_poly_commit::Evaluations;
 //use rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator}
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rayon::iter::IntoParallelIterator;
@@ -73,6 +75,63 @@ pub fn compute_g_plonk<E: PairingEngine>(
 
     (poly, pcom)
 }
+
+// The multivariate form corresponding to plonk polynomial protocol aggregation
+pub fn compute_g_plonk_optimized<E: PairingEngine>(
+    q_M: &Vec<E::Fr>,
+    q_L: &Vec<E::Fr>,
+    q_R: &Vec<E::Fr>,
+    q_O: &Vec<E::Fr>,
+    q_C: &Vec<E::Fr>,
+    S_a: &Vec<E::Fr>,
+    S_b: &Vec<E::Fr>,
+    S_c: &Vec<E::Fr>,
+    l0_poly: &Vec<E::Fr>,
+    w_A: &DensePolynomial<E::Fr>,
+    w_B: &DensePolynomial<E::Fr>,
+    w_C: &DensePolynomial<E::Fr>,
+    z_poly: &DensePolynomial<E::Fr>,
+    zw_poly: &DensePolynomial<E::Fr>,
+    alpha: E::Fr,
+    beta: E::Fr,
+    gamma: E::Fr,
+    plonk_setup: &PlonkSetup<E::Fr>,
+    pp: &PublicParameters<E>,
+    with_com: bool,
+) -> (DensePolynomial<E::Fr>, E::G1Affine)
+{
+    //let zw_poly = &compute_shifted_difference::<E>(&z_poly, plonk_setup.h_domain_size) + z_poly;
+    let eval_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(plonk_setup.domain.size() * 4).unwrap();
+    let w_A = w_A.evaluate_over_domain_by_ref(eval_domain).evals;
+    let w_B = w_B.evaluate_over_domain_by_ref(eval_domain).evals;
+    let w_C = w_C.evaluate_over_domain_by_ref(eval_domain).evals;
+    let z_poly = z_poly.evaluate_over_domain_by_ref(eval_domain).evals;
+    let zw_poly = zw_poly.evaluate_over_domain_by_ref(eval_domain).evals;
+    let k1 = plonk_setup.k1;
+    let k2 = plonk_setup.k2;
+
+    let poly_evals = (0..eval_domain.size()).into_iter().map(|i| {
+        (q_M[i]*w_A[i]*w_B[i] + q_L[i]*w_A[i] + q_R[i]*w_B[i] + q_O[i]*w_C[i] + q_C[i])
+        +((w_A[i] + beta*eval_domain.element(i) + gamma)*(w_B[i] + beta*k1*eval_domain.element(i) + gamma)*(w_C[i] + beta*k2*eval_domain.element(i))*z_poly[i])*alpha
+        -((w_A[i] + beta*S_a[i] + gamma)*(w_B[i] + beta*S_b[i] + gamma)*(w_C[i] + beta*S_c[i]+gamma)*zw_poly[i])*alpha
+        +l0_poly[i]*(z_poly[i] - E::Fr::one())*alpha*alpha
+    }).collect::<Vec<_>>();
+
+    let mut poly = DensePolynomial::<E::Fr>::from_coefficients_vec(eval_domain.ifft(&poly_evals));
+    (poly, _) = poly.divide_by_vanishing_poly(plonk_setup.domain).unwrap();
+
+    let pcom = if with_com {
+        KZGCommit::commit_g1(&pp.poly_ck, &poly)
+    } else {
+        E::G1Affine::zero()
+    };
+
+    (poly, pcom)
+}
+
+
+
+
 
 pub fn compute_g_plonk_y<E: PairingEngine>(
     q_M: &DensePolynomial<E::Fr>,
@@ -146,6 +205,20 @@ pub fn compute_aplonk_proof<E: PairingEngine>(
     let n = 1usize << plonk_setup.h_domain_size;
     let K = 1usize << k_domain_size;
     let k_domain: GeneralEvaluationDomain<E::Fr> = GeneralEvaluationDomain::new(K).unwrap();
+
+    println!("Computing circuit specific evaluations");
+    let eval_domain = GeneralEvaluationDomain::<E::Fr>::new(plonk_setup.domain.size()*4).unwrap();
+    let q_M = circuit.q_M.evaluate_over_domain_by_ref(eval_domain);
+    let q_L = circuit.q_L.evaluate_over_domain_by_ref(eval_domain);
+    let q_R = circuit.q_R.evaluate_over_domain_by_ref(eval_domain);
+    let q_O = circuit.q_O.evaluate_over_domain_by_ref(eval_domain);
+    let q_C = circuit.q_C.evaluate_over_domain_by_ref(eval_domain);
+    let S_a = circuit.S_a.evaluate_over_domain_by_ref(eval_domain);
+    let S_b = circuit.S_b.evaluate_over_domain_by_ref(eval_domain);
+    let S_c = circuit.S_c.evaluate_over_domain_by_ref(eval_domain);
+    let l0_poly = plonk_setup.l0_poly.evaluate_over_domain_by_ref(eval_domain);
+    println!("Finished circuit specific evaluations");
+
 
     let mut transcript = CaulkTranscript::<E::Fr>::new();
     //let mut start = Instant::now();
@@ -224,19 +297,18 @@ pub fn compute_aplonk_proof<E: PairingEngine>(
 
     println!("Computing H polynomial");
     start = Instant::now();
-
     // Compute H(X,Y) with component polynomials as G(A_i,B_i,...)
     let (h_polys, h_coms) = (0..K).into_par_iter().map(|i| {
-        compute_g_plonk::<E>(
-            &circuit.q_M,
-            &circuit.q_L,
-            &circuit.q_R,
-            &circuit.q_O,
-            &circuit.q_C,
-            &circuit.S_a,
-            &circuit.S_b,
-            &circuit.S_c,
-            &plonk_setup.l0_poly,
+        compute_g_plonk_optimized::<E>(
+            &q_M.evals,
+            &q_L.evals,
+            &q_R.evals,
+            &q_O.evals,
+            &q_C.evals,
+            &S_a.evals,
+            &S_b.evals,
+            &S_c.evals,
+            &l0_poly.evals,
             &wa_polys[i],
             &wb_polys[i],
             &wc_polys[i],
